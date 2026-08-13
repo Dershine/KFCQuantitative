@@ -1,0 +1,21 @@
+[Unit]
+Description=KFCQuant Operations Manager
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kfcops
+Group=kfcops
+WorkingDirectory=/opt/kfcquant/ops
+EnvironmentFile=/etc/kfcquant/ops.env
+ExecStart=/opt/kfcquant/ops/.venv/bin/kfcops serve --host 127.0.0.1 --port 8600
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/kfcops /var/lib/kfcquant /opt/kfcquant/research
+
+[Install]
+WantedBy=multi-user.target

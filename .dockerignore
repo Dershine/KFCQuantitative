@@ -1,0 +1,15 @@
+.git
+.env
+.ops.env
+.venv
+data
+reports
+runtime
+backups
+logs
+.pytest_cache
+.ruff_cache
+htmlcov
+pytest-output.txt
+**/__pycache__
+**/*.pyc

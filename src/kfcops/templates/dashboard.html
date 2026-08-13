@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="refresh" content="30">
+  <title>KFCQuant 运行管理器</title>
+  <style>
+    :root{font-family:system-ui,sans-serif;color:#172033;background:#f3f6fa}body{margin:0}.wrap{max-width:1180px;margin:auto;padding:28px}
+    h1{margin:0 0 6px}.muted{color:#667085}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin:20px 0}
+    .card{background:white;border:1px solid #dfe5ec;border-radius:12px;padding:18px;box-shadow:0 2px 9px #24324a0d}table{width:100%;border-collapse:collapse;font-size:14px}
+    th,td{text-align:left;padding:9px;border-bottom:1px solid #edf0f3;vertical-align:top}.ok{color:#087443}.bad{color:#b42318}.pill{padding:3px 8px;border-radius:999px;background:#eef2f6}
+    button{background:#174ea6;color:white;border:0;border-radius:7px;padding:8px 11px;cursor:pointer}.danger{background:#b42318}.secondary{background:#475467}
+    form{display:inline-block;margin:2px}pre{white-space:pre-wrap;max-height:320px;overflow:auto;background:#101828;color:#d0d5dd;padding:12px;border-radius:8px;font-size:12px}
+  </style>
+</head>
+<body><main class="wrap">
+  <h1>KFCQuant 运行管理器</h1><div class="muted">只管理发布与运行状态，不参与荐股计算。页面每30秒刷新。</div>
+  {% if error %}<p class="bad">{{ error }}</p>{% endif %}
+  <section class="grid">
+    <div class="card"><h2>当前版本</h2><p><b>{{ runtime.active_sha or '尚未记录' }}</b></p><p>上一版本：{{ runtime.previous_sha or '无' }}</p><p>待处理：{{ runtime.pending_sha or '无' }}</p><p>磁盘剩余：{{ '%.1f'|format(runtime.disk_free_bytes / 1073741824) }} GiB</p><p>证书到期：{{ runtime.certificate.expires_at or runtime.certificate.error or '未配置' }}</p></div>
+    <div class="card"><h2>研究状态</h2><p class="{{ 'ok' if research.ok else 'bad' }}">{{ '数据库可读' if research.ok else research.message }}</p>{% for signal in research.signals %}<p><span class="pill">{{ signal.signal_kind }}</span> {{ signal.status }} · {{ signal.as_of }} · {{ signal.candidate_count }}只</p>{% endfor %}</div>
+    <div class="card"><h2>固定操作</h2>
+      <form method="post" action="/ops/actions/restart"><input type="hidden" name="csrf" value="{{ csrf }}"><label><input type="checkbox" name="confirm" value="yes" required> 确认</label><button class="secondary">重启研究服务</button></form>
+      <form method="post" action="/ops/actions/rollback"><input type="hidden" name="csrf" value="{{ csrf }}"><label><input type="checkbox" name="confirm" value="yes" required> 确认</label><button class="danger">回滚上一版本</button></form>
+      {% if runtime.pending_sha %}<form method="post" action="/ops/actions/cancel-pending"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="confirm" value="yes"><button class="secondary">取消待处理</button></form>{% endif %}
+    </div>
+  </section>
+  <section class="card"><h2>可用版本</h2><table><tr><th>版本</th><th>提交</th><th>时间</th><th>操作</th></tr>{% for release in releases %}<tr><td>{{ release.short_sha }}</td><td>{{ release.message }}</td><td>{{ release.date }}</td><td>{% if release.deployable %}<form method="post" action="/ops/actions/deploy/{{ release.sha }}"><input type="hidden" name="csrf" value="{{ csrf }}"><label><input type="checkbox" name="confirm" value="yes" required>确认</label><button>部署</button></form>{% else %}<span class="bad">测试未通过</span>{% endif %}</td></tr>{% endfor %}</table></section>
+  <section class="card"><h2>部署进度</h2><table><tr><th>ID</th><th>目标</th><th>状态</th><th>消息</th><th>时间</th></tr>{% for item in deployments %}<tr><td>{{ item.id }}</td><td>{{ item.target_sha[:12] }}</td><td><span class="pill">{{ item.status }}</span></td><td>{{ item.message }}</td><td>{{ item.requested_at }}</td></tr>{% endfor %}</table></section>
+  <section class="grid"><div class="card"><h2>容器状态</h2><pre>{{ runtime.compose_ps }}</pre></div><div class="card"><h2>最近日志</h2><pre>{{ logs }}</pre></div></section>
+  <section class="card"><h2>审计记录</h2><table><tr><th>时间</th><th>操作</th><th>目标</th><th>结果</th><th>详情</th></tr>{% for item in audit %}<tr><td>{{ item.happened_at }}</td><td>{{ item.action }}</td><td>{{ item.target }}</td><td>{{ item.result }}</td><td>{{ item.detail }}</td></tr>{% endfor %}</table></section>
+</main></body></html>

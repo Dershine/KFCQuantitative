@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta
+
+import pandas as pd
+
+from kfcquant.config import SHANGHAI_TZ
+from kfcquant.db import Database
+from kfcquant.services.workflow import Workflow
+from tests.conftest import make_daily, make_quotes, make_securities
+
+
+class FakeMarket:
+    def fetch_official_documents(self, start, end):
+        return []
+
+    def fetch_mainstream_documents(self, start, end):
+        return []
+
+
+class FakeLive:
+    def __init__(self, quotes):
+        self.quotes = quotes
+
+    def fetch_quotes(self, ts_codes=None):
+        return self.quotes.copy()
+
+    def fetch_intraday_bars(self, ts_code, start, end, frequency_minutes=5):
+        return []
+
+
+class FakeLLM:
+    def extract_risk_events(self, document):
+        return []
+
+    def generate_report(self, context):
+        return "# fixture"
+
+
+class FakeRangeMarket:
+    source_name = "fixture-range"
+
+    def __init__(self, securities, bars):
+        self.securities = securities
+        self.bars = bars
+
+    def fetch_securities(self):
+        return self.securities.copy()
+
+    def fetch_trade_calendar(self, start, end):
+        dates = pd.date_range(start=start, end=end, freq="D")
+        return pd.DataFrame(
+            [
+                {
+                    "cal_date": item.date(),
+                    "is_open": item.weekday() < 5,
+                    "pretrade_date": None,
+                }
+                for item in dates
+            ]
+        )
+
+    def iter_daily_range(self, start, end, ts_codes):
+        assert ts_codes
+        yield self.bars[(self.bars["trade_date"] >= start) & (self.bars["trade_date"] <= end)].copy()
+
+
+def test_preclose_end_to_end_creates_auditable_orders(settings):
+    at = datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ)
+    codes = ["600000.SH", "000001.SZ", "002001.SZ", "603001.SH", "001001.SZ", "605001.SH"]
+    database = Database(settings.database_path, settings.initial_cash)
+    database.initialize()
+    database.upsert_trade_calendar(
+        pd.DataFrame([{"cal_date": at.date(), "is_open": True, "pretrade_date": (at - timedelta(days=3)).date()}])
+    )
+    database.upsert_securities(make_securities([(code, code) for code in codes]))
+    database.upsert_daily_bars(make_daily(codes, at))
+    quotes = make_quotes(codes, at)
+    workflow = Workflow(
+        settings,
+        database=database,
+        market_provider=FakeMarket(),
+        live_provider=FakeLive(quotes),
+        llm_provider=FakeLLM(),
+    )
+    run = workflow.run_preclose(as_of=at)
+    assert run.tradable
+    assert run.candidate_count == len(codes)
+    assert len(database.get_candidates(run.run_id)) == len(codes)
+    assert len(database.proposed_orders(run.run_id)) == len(codes)  # first five plus one reserve candidate
+
+
+def test_preclose_outside_window_is_recorded_missed(settings):
+    database = Database(settings.database_path, settings.initial_cash)
+    database.initialize()
+    database.upsert_trade_calendar(
+        pd.DataFrame([{"cal_date": date(2026, 8, 10), "is_open": True, "pretrade_date": date(2026, 8, 7)}])
+    )
+    workflow = Workflow(
+        settings,
+        database=database,
+        market_provider=FakeMarket(),
+        live_provider=FakeLive(pd.DataFrame()),
+        llm_provider=FakeLLM(),
+    )
+    run = workflow.run_preclose(datetime(2026, 8, 10, 16, 0, tzinfo=SHANGHAI_TZ))
+    assert run.status.value == "missed"
+    assert not run.tradable
+
+
+def test_preclose_fails_closed_when_calendar_does_not_confirm_open(settings):
+    workflow = Workflow(
+        settings,
+        database=Database(settings.database_path, settings.initial_cash),
+        market_provider=FakeMarket(),
+        live_provider=FakeLive(pd.DataFrame()),
+        llm_provider=FakeLLM(),
+    )
+    run = workflow.run_preclose(datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ))
+    assert run.status.value == "missed"
+    assert "交易日历" in run.message
+
+
+def test_sync_eod_uses_provider_range_loader(settings):
+    end = datetime(2026, 8, 10, 16, 30, tzinfo=SHANGHAI_TZ)
+    code = "600000.SH"
+    database = Database(settings.database_path, settings.initial_cash)
+    market = FakeRangeMarket(make_securities([(code, "公司")]), make_daily([code], end, days=3))
+    workflow = Workflow(
+        settings,
+        database=database,
+        market_provider=market,
+        live_provider=FakeLive(pd.DataFrame()),
+        news_provider=FakeMarket(),
+        llm_provider=FakeLLM(),
+    )
+    result = workflow.sync_eod(date(2026, 8, 5), date(2026, 8, 10))
+    assert result["bars"] == 3
+    assert len(database.get_recent_daily_bars()) == 3

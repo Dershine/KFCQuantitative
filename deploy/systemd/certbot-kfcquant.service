@@ -1,0 +1,6 @@
+[Unit]
+Description=Renew KFCQuant short-lived IP certificate
+
+[Service]
+Type=oneshot
+ExecStart=/opt/certbot/bin/certbot renew --quiet --deploy-hook "systemctl reload nginx"

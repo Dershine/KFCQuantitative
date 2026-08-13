@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+
+from kfcquant.db import Database
+from kfcquant.interfaces import LLMProvider, NewsProvider
+from kfcquant.models import NewsDocument
+from kfcquant.providers.document_loader import DocumentLoader
+
+RISK_KEYWORDS = (
+    "立案",
+    "调查",
+    "处罚",
+    "退市",
+    "风险警示",
+    "ST",
+    "下修",
+    "亏损",
+    "非标",
+    "保留意见",
+    "违约",
+    "诉讼",
+    "仲裁",
+    "违规担保",
+    "减持",
+    "事故",
+    "停产",
+    "暂停上市",
+    "停牌",
+    "冻结",
+    "失信",
+    "破产",
+    "终止上市",
+    "无法表示意见",
+    "重大风险",
+)
+
+POSITIVE_KEYWORDS = (
+    "中标",
+    "增持",
+    "回购",
+    "预增",
+    "扭亏",
+    "突破",
+    "获批",
+    "签订合同",
+    "战略合作",
+    "订单增长",
+)
+
+
+@dataclass
+class NewsSyncResult:
+    official_healthy: bool
+    mainstream_healthy: bool
+    fetched_documents: int
+    inserted_documents: int
+    processed_documents: int
+    failed_documents: int
+    messages: list[str]
+
+
+class NewsService:
+    def __init__(
+        self,
+        database: Database,
+        provider: NewsProvider,
+        llm: LLMProvider | None,
+        loader: DocumentLoader,
+    ):
+        self.database = database
+        self.provider = provider
+        self.llm = llm
+        self.loader = loader
+
+    def _map_entities(self, documents: list[NewsDocument]) -> None:
+        securities = self.database.get_securities()
+        if securities.empty:
+            return
+        names = sorted(
+            (
+                (str(row["name"]), str(row["ts_code"]))
+                for row in securities.to_dict("records")
+                if len(str(row["name"])) >= 3
+            ),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        )
+        for document in documents:
+            if document.ts_code:
+                continue
+            text = f"{document.title}\n{document.content or ''}"
+            matched = [code for name, code in names if name in text]
+            if len(set(matched)) == 1:
+                document.ts_code = matched[0]
+
+    def sync(self, start: datetime, end: datetime) -> NewsSyncResult:
+        official_healthy = True
+        mainstream_healthy = True
+        messages: list[str] = []
+        documents: list[NewsDocument] = []
+        try:
+            documents.extend(self.provider.fetch_official_documents(start, end))
+        except Exception as exc:
+            official_healthy = False
+            messages.append(f"官方公告接口失败: {exc}")
+        try:
+            documents.extend(self.provider.fetch_mainstream_documents(start, end))
+        except Exception as exc:
+            mainstream_healthy = False
+            messages.append(f"主流新闻接口失败: {exc}")
+        self._map_entities(documents)
+        inserted = self.database.save_news_documents(documents)
+        processed, failed = self.process_pending()
+        return NewsSyncResult(
+            official_healthy=official_healthy,
+            mainstream_healthy=mainstream_healthy,
+            fetched_documents=len(documents),
+            inserted_documents=inserted,
+            processed_documents=processed,
+            failed_documents=failed,
+            messages=messages,
+        )
+
+    def process_pending(self, limit: int = 5_000) -> tuple[int, int]:
+        processed = 0
+        failed = 0
+        for document in self.database.pending_news_documents(limit=limit):
+            text = f"{document.title}\n{document.content or ''}"
+            extraction_keywords = RISK_KEYWORDS + POSITIVE_KEYWORDS
+            if not any(keyword.upper() in text.upper() for keyword in extraction_keywords):
+                self.database.mark_document(document.document_id, "processed")
+                processed += 1
+                continue
+            try:
+                content = document.content
+                if not content and document.url:
+                    content = self.loader.load_text(document.url)
+                    if not content:
+                        raise ValueError("文档没有可抽取文本")
+                    document.content = content
+                if self.llm is None:
+                    raise RuntimeError("LLM未配置，风险公告不能安全抽取")
+                events = self.llm.extract_risk_events(document)
+                self.database.save_risk_events(events)
+                self.database.mark_document(document.document_id, "processed", content=content)
+                processed += 1
+            except Exception as exc:
+                self.database.mark_document(document.document_id, "failed", error=str(exc)[:1000])
+                failed += 1
+        return processed, failed
