@@ -87,3 +87,21 @@ def test_latest_historical_st_state_is_excluded(settings):
         at,
     )
     assert result.candidates == []
+
+
+def test_scoring_uses_shared_candidate_limit(settings):
+    at = datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ)
+    codes = ["600000.SH", "601001.SH", "603001.SH", "605001.SH"]
+    configured = settings.model_copy(
+        update={"selection": settings.selection.model_copy(update={"top_n": 2, "candidate_limit": 3})}
+    )
+
+    result = ScoringService(configured).score(
+        "limited",
+        make_securities([(code, code) for code in codes]),
+        make_daily(codes, at),
+        make_quotes(codes, at),
+        at,
+    )
+
+    assert len(result.candidates) == 3

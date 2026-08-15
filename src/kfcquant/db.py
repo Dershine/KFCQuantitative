@@ -11,7 +11,9 @@ import duckdb
 import pandas as pd
 from filelock import FileLock
 
+from kfcquant.migrations import Migration, MigrationRunner
 from kfcquant.models import (
+    READABLE_RESEARCH_RUN_STATES,
     CandidateOutcome,
     CandidateScore,
     NewsDocument,
@@ -113,6 +115,7 @@ CREATE TABLE IF NOT EXISTS signal_runs (
     information_cutoff TIMESTAMPTZ,
     data_as_of TIMESTAMPTZ,
     status VARCHAR NOT NULL,
+    lifecycle_state VARCHAR NOT NULL DEFAULT 'published',
     data_fresh BOOLEAN NOT NULL,
     official_news_healthy BOOLEAN NOT NULL,
     mainstream_news_healthy BOOLEAN NOT NULL,
@@ -245,6 +248,36 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 """
 
+MIGRATIONS = (
+    Migration(1, "initial_schema", (SCHEMA_SQL,)),
+    Migration(
+        2,
+        "dual_signal_fields_and_historical_st",
+        (
+            "ALTER TABLE daily_bars ADD COLUMN IF NOT EXISTS is_st BOOLEAN DEFAULT false",
+            "ALTER TABLE signal_runs ADD COLUMN IF NOT EXISTS signal_kind VARCHAR DEFAULT 'preclose_entry'",
+            "ALTER TABLE signal_runs ADD COLUMN IF NOT EXISTS strategy_version VARCHAR DEFAULT 'preclose-v1'",
+            "ALTER TABLE signal_runs ADD COLUMN IF NOT EXISTS information_cutoff TIMESTAMPTZ",
+            "ALTER TABLE signal_runs ADD COLUMN IF NOT EXISTS data_as_of TIMESTAMPTZ",
+            "UPDATE signal_runs SET signal_kind='preclose_entry' WHERE signal_kind IS NULL",
+            "UPDATE signal_runs SET strategy_version='preclose-v1' WHERE strategy_version IS NULL",
+            "UPDATE signal_runs SET information_cutoff=as_of WHERE information_cutoff IS NULL",
+        ),
+    ),
+    Migration(
+        3,
+        "research_run_lifecycle",
+        (
+            "ALTER TABLE signal_runs ADD COLUMN IF NOT EXISTS lifecycle_state VARCHAR DEFAULT 'published'",
+            """UPDATE signal_runs SET lifecycle_state = CASE status
+               WHEN 'running' THEN 'evaluating'
+               WHEN 'failed' THEN 'failed'
+               WHEN 'missed' THEN 'missed'
+               ELSE 'published' END""",
+        ),
+    ),
+)
+
 
 class Database:
     def __init__(
@@ -274,20 +307,7 @@ class Database:
 
     def initialize(self) -> None:
         with self.connect() as connection:
-            connection.execute(SCHEMA_SQL)
-            connection.execute("ALTER TABLE daily_bars ADD COLUMN IF NOT EXISTS is_st BOOLEAN DEFAULT false")
-            connection.execute(
-                "ALTER TABLE signal_runs ADD COLUMN IF NOT EXISTS signal_kind VARCHAR DEFAULT 'preclose_entry'"
-            )
-            connection.execute(
-                "ALTER TABLE signal_runs ADD COLUMN IF NOT EXISTS strategy_version VARCHAR DEFAULT 'preclose-v1'"
-            )
-            connection.execute("ALTER TABLE signal_runs ADD COLUMN IF NOT EXISTS information_cutoff TIMESTAMPTZ")
-            connection.execute("ALTER TABLE signal_runs ADD COLUMN IF NOT EXISTS data_as_of TIMESTAMPTZ")
-            connection.execute("UPDATE signal_runs SET signal_kind='preclose_entry' WHERE signal_kind IS NULL")
-            connection.execute("UPDATE signal_runs SET strategy_version='preclose-v1' WHERE strategy_version IS NULL")
-            connection.execute("UPDATE signal_runs SET information_cutoff=as_of WHERE information_cutoff IS NULL")
-            connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (1), (2)")
+            MigrationRunner(connection).apply(MIGRATIONS)
             connection.execute(
                 "INSERT INTO paper_account(account_id, initial_cash, cash) "
                 "SELECT 'default', ?, ? WHERE NOT EXISTS "
@@ -483,55 +503,118 @@ class Database:
             ).fetchall()
         return {row[0] for row in rows}
 
-    def save_signal_run(self, run: SignalRun) -> None:
-        with self.connect() as connection:
+    @staticmethod
+    def _write_signal_run(connection: duckdb.DuckDBPyConnection, run: SignalRun) -> None:
+        connection.execute(
+            """INSERT OR REPLACE INTO signal_runs (
+               run_id, as_of, signal_kind, strategy_version, information_cutoff, data_as_of,
+               status, lifecycle_state, data_fresh, official_news_healthy, mainstream_news_healthy,
+               tradable, message, candidate_count, metadata_json
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                run.run_id,
+                run.as_of,
+                run.signal_kind.value,
+                run.strategy_version,
+                run.information_cutoff or run.as_of,
+                run.data_as_of,
+                run.status.value,
+                run.lifecycle_state.value,
+                run.data_fresh,
+                run.official_news_healthy,
+                run.mainstream_news_healthy,
+                run.tradable,
+                run.message,
+                run.candidate_count,
+                json.dumps(run.metadata, ensure_ascii=False, sort_keys=True),
+            ],
+        )
+
+    @staticmethod
+    def _write_candidates(
+        connection: duckdb.DuckDBPyConnection,
+        candidates: list[CandidateScore],
+    ) -> None:
+        for candidate in candidates:
             connection.execute(
-                """INSERT OR REPLACE INTO signal_runs (
-                   run_id, as_of, signal_kind, strategy_version, information_cutoff, data_as_of,
-                   status, data_fresh, official_news_healthy, mainstream_news_healthy,
-                   tradable, message, candidate_count, metadata_json
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                "INSERT OR REPLACE INTO candidate_scores VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
-                    run.run_id,
-                    run.as_of,
-                    run.signal_kind.value,
-                    run.strategy_version,
-                    run.information_cutoff or run.as_of,
-                    run.data_as_of,
-                    run.status.value,
-                    run.data_fresh,
-                    run.official_news_healthy,
-                    run.mainstream_news_healthy,
-                    run.tradable,
-                    run.message,
-                    run.candidate_count,
-                    json.dumps(run.metadata, ensure_ascii=False),
+                    candidate.run_id,
+                    candidate.ts_code,
+                    candidate.name,
+                    candidate.rank,
+                    candidate.opportunity_score,
+                    candidate.factor_breakdown.model_dump_json(),
+                    json.dumps(candidate.risk_event_ids, ensure_ascii=False),
+                    candidate.blocked,
+                    json.dumps(candidate.block_reasons, ensure_ascii=False),
+                    candidate.quote_at,
                 ],
             )
 
+    @staticmethod
+    def _write_order(connection: duckdb.DuckDBPyConnection, order: PaperOrder) -> bool:
+        exists = connection.execute(
+            "SELECT 1 FROM paper_orders WHERE run_id=? AND ts_code=? AND side=?",
+            [order.run_id, order.ts_code, order.side.value],
+        ).fetchone()
+        if exists:
+            return False
+        connection.execute(
+            "INSERT INTO paper_orders VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                order.order_id,
+                order.run_id,
+                order.ts_code,
+                order.side.value,
+                order.status.value,
+                order.created_at,
+                order.target_value,
+                order.reason,
+                order.position_id,
+            ],
+        )
+        return True
+
+    @staticmethod
+    def _write_job(
+        connection: duckdb.DuckDBPyConnection,
+        job_run_id: str,
+        job_name: str,
+        started_at: datetime,
+        status: str,
+        message: str,
+        finished_at: datetime | None = None,
+        scheduled_for: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        connection.execute(
+            "INSERT OR REPLACE INTO job_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                job_run_id,
+                job_name,
+                scheduled_for,
+                started_at,
+                finished_at,
+                status,
+                message,
+                json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True),
+            ],
+        )
+
+    def save_signal_run(self, run: SignalRun) -> None:
+        with self.connect() as connection:
+            self._write_signal_run(connection, run)
+
     def save_candidates(self, candidates: list[CandidateScore]) -> None:
         with self.connect() as connection:
-            for candidate in candidates:
-                connection.execute(
-                    "INSERT OR REPLACE INTO candidate_scores VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    [
-                        candidate.run_id,
-                        candidate.ts_code,
-                        candidate.name,
-                        candidate.rank,
-                        candidate.opportunity_score,
-                        candidate.factor_breakdown.model_dump_json(),
-                        json.dumps(candidate.risk_event_ids, ensure_ascii=False),
-                        candidate.blocked,
-                        json.dumps(candidate.block_reasons, ensure_ascii=False),
-                        candidate.quote_at,
-                    ],
-                )
+            self._write_candidates(connection, candidates)
 
     def latest_signal_run(
         self,
         on_date: date | None = None,
         signal_kind: str | None = None,
+        include_non_terminal: bool = False,
     ) -> dict[str, Any] | None:
         conditions: list[str] = []
         params: list[Any] = []
@@ -541,6 +624,10 @@ class Database:
         if signal_kind:
             conditions.append("signal_kind=?")
             params.append(signal_kind)
+        if not include_non_terminal:
+            readable = sorted(state.value for state in READABLE_RESEARCH_RUN_STATES)
+            conditions.append(f"lifecycle_state IN ({', '.join('?' for _ in readable)})")
+            params.extend(readable)
         condition = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         with self.connect(read_only=True) as connection:
             row = connection.execute(
@@ -552,9 +639,29 @@ class Database:
 
     def get_candidates(self, run_id: str, include_blocked: bool = True) -> pd.DataFrame:
         blocked_filter = "" if include_blocked else "AND NOT blocked"
+        readable = sorted(state.value for state in READABLE_RESEARCH_RUN_STATES)
         with self.connect(read_only=True) as connection:
             return connection.execute(
-                f"SELECT * FROM candidate_scores WHERE run_id=? {blocked_filter} ORDER BY rank", [run_id]
+                f"""SELECT candidate_scores.* FROM candidate_scores
+                    JOIN signal_runs USING (run_id)
+                    WHERE run_id=? {blocked_filter}
+                      AND lifecycle_state IN ({', '.join('?' for _ in readable)})
+                    ORDER BY rank""",
+                [run_id, *readable],
+            ).fetchdf()
+
+    def recent_signal_runs(self, limit: int = 100, include_non_terminal: bool = False) -> pd.DataFrame:
+        params: list[Any] = []
+        where = ""
+        if not include_non_terminal:
+            readable = sorted(state.value for state in READABLE_RESEARCH_RUN_STATES)
+            where = f"WHERE lifecycle_state IN ({', '.join('?' for _ in readable)})"
+            params.extend(readable)
+        params.append(limit)
+        with self.connect(read_only=True) as connection:
+            return connection.execute(
+                f"SELECT * FROM signal_runs {where} ORDER BY as_of DESC LIMIT ?",
+                params,
             ).fetchdf()
 
     def get_cash(self) -> float:
@@ -567,27 +674,7 @@ class Database:
 
     def save_order(self, order: PaperOrder) -> bool:
         with self.connect() as connection:
-            exists = connection.execute(
-                "SELECT 1 FROM paper_orders WHERE run_id=? AND ts_code=? AND side=?",
-                [order.run_id, order.ts_code, order.side.value],
-            ).fetchone()
-            if exists:
-                return False
-            connection.execute(
-                "INSERT INTO paper_orders VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    order.order_id,
-                    order.run_id,
-                    order.ts_code,
-                    order.side.value,
-                    order.status.value,
-                    order.created_at,
-                    order.target_value,
-                    order.reason,
-                    order.position_id,
-                ],
-            )
-            return True
+            return self._write_order(connection, order)
 
     def proposed_orders(self, run_id: str | None = None) -> pd.DataFrame:
         condition = "status='proposed'"
@@ -849,18 +936,16 @@ class Database:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         with self.connect() as connection:
-            connection.execute(
-                "INSERT OR REPLACE INTO job_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    job_run_id,
-                    job_name,
-                    scheduled_for,
-                    started_at,
-                    finished_at,
-                    status,
-                    message,
-                    json.dumps(metadata or {}, ensure_ascii=False),
-                ],
+            self._write_job(
+                connection,
+                job_run_id,
+                job_name,
+                started_at,
+                status,
+                message,
+                finished_at,
+                scheduled_for,
+                metadata,
             )
 
     def save_report(

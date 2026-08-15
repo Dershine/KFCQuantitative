@@ -19,18 +19,19 @@ class ReportService:
     def _fallback(context: dict[str, object]) -> str:
         candidates = context.get("candidates", [])
         after_entry = context.get("after_entry_events", [])
+        signal_label = str(context.get("preclose_label", "尾盘信号"))
         return "\n".join(
             [
                 f"# {context['report_date']} 尾盘机会研究复盘",
                 "",
                 "> 本报告仅记录量化研究与影子组合，不构成投资建议。",
                 "",
-                f"- 14:40候选数：{len(candidates)}",
+                f"- {signal_label}候选数：{len(candidates)}",
                 f"- 入场后新增风险事件：{len(after_entry)}",
                 f"- 影子组合现金：{context.get('cash', 'N/A')}",
                 f"- 当前持仓数：{len(context.get('positions', []))}",
                 "",
-                "收盘后未知公告无法由14:40系统提前预测，属于不可消除的隔夜风险。",
+                f"收盘后未知公告无法由{signal_label}提前预测，属于不可消除的隔夜风险。",
             ]
         )
 

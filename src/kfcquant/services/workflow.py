@@ -12,7 +12,7 @@ import pandas as pd
 from kfcquant.config import SHANGHAI_TZ, Settings
 from kfcquant.db import Database
 from kfcquant.interfaces import LiveQuoteProvider, LLMProvider, MarketDataProvider, NewsProvider
-from kfcquant.models import RunStatus, SignalKind, SignalRun
+from kfcquant.models import ResearchRunState, RunStatus, SignalKind, SignalRun
 from kfcquant.providers.document_loader import DocumentLoader
 from kfcquant.providers.factory import (
     build_live_provider,
@@ -25,6 +25,11 @@ from kfcquant.services.news import NewsService, NewsSyncResult
 from kfcquant.services.portfolio import PortfolioService
 from kfcquant.services.reports import ReportService
 from kfcquant.services.scoring import ScoringService
+from kfcquant.unit_of_work import (
+    DuckDBResearchRunUnitOfWork,
+    JobCompletion,
+    ResearchRunUnitOfWork,
+)
 
 MINIMUM_PYTHON_VERSION = (3, 12)
 
@@ -38,6 +43,7 @@ class Workflow:
         live_provider: LiveQuoteProvider | None = None,
         news_provider: NewsProvider | None = None,
         llm_provider: LLMProvider | None = None,
+        run_uow: ResearchRunUnitOfWork | None = None,
     ):
         self.settings = settings
         self.database = database or Database(
@@ -60,6 +66,7 @@ class Workflow:
         self.scoring = ScoringService(settings)
         self.portfolio = PortfolioService(self.database, settings, self.live_provider)
         self.evaluation = CandidateEvaluationService(self.database, settings, self.live_provider)
+        self.run_uow = run_uow or DuckDBResearchRunUnitOfWork(self.database)
 
     @property
     def market_provider(self) -> MarketDataProvider:
@@ -125,6 +132,25 @@ class Workflow:
     ) -> None:
         self.database.record_job(
             job_id, name, started, status, message, finished_at=datetime.now(SHANGHAI_TZ), metadata=metadata
+        )
+
+    @staticmethod
+    def _job_completion(
+        job_id: str,
+        name: str,
+        started: datetime,
+        status: str,
+        message: str,
+        **metadata: Any,
+    ) -> JobCompletion:
+        return JobCompletion(
+            job_run_id=job_id,
+            job_name=name,
+            started_at=started,
+            finished_at=datetime.now(SHANGHAI_TZ),
+            status=status,
+            message=message,
+            metadata=metadata,
         )
 
     def doctor(self, online: bool = False) -> list[dict[str, object]]:
@@ -301,7 +327,7 @@ class Workflow:
             as_of = as_of.replace(tzinfo=SHANGHAI_TZ)
         started = datetime.now(SHANGHAI_TZ)
         job_id = self._job_start("run-preclose", started)
-        window_ok = time(14, 35) <= as_of.time() <= time(14, 43)
+        window_ok = self.settings.schedule.preclose_window.contains(as_of)
         trading_day = self.database.is_trading_day(as_of.date())
         if not trading_day:
             run = SignalRun(
@@ -316,8 +342,12 @@ class Workflow:
                 tradable=False,
                 message="交易日历未确认当日开市，禁止生成尾盘信号",
             )
-            self.database.save_signal_run(run)
-            self._job_finish(job_id, "run-preclose", started, "missed", run.message)
+            self.run_uow.commit(
+                run,
+                [],
+                [],
+                self._job_completion(job_id, "run-preclose", started, "missed", run.message),
+            )
             return run
         if not window_ok and not research_outside_window:
             run = SignalRun(
@@ -330,12 +360,28 @@ class Workflow:
                 official_news_healthy=False,
                 mainstream_news_healthy=False,
                 tradable=False,
-                message="不在14:35至14:43窗口内，禁止补造尾盘信号",
+                message=f"不在{self.settings.schedule.preclose_window.describe()}窗口内，禁止补造尾盘信号",
             )
-            self.database.save_signal_run(run)
-            self._job_finish(job_id, "run-preclose", started, "missed", run.message)
+            self.run_uow.commit(
+                run,
+                [],
+                [],
+                self._job_completion(job_id, "run-preclose", started, "missed", run.message),
+            )
             return run
         try:
+            draft = SignalRun(
+                as_of=as_of,
+                signal_kind=SignalKind.PRECLOSE_ENTRY,
+                strategy_version=self.settings.strategy_version_preclose,
+                information_cutoff=as_of,
+                status=RunStatus.RUNNING,
+                lifecycle_state=ResearchRunState.CREATED,
+                data_fresh=False,
+                official_news_healthy=False,
+                mainstream_news_healthy=False,
+                tradable=False,
+            ).transition_to(ResearchRunState.COLLECTING_DATA)
             quotes = self.live_provider.fetch_quotes()
             self.database.insert_live_quotes(quotes)
             self._raw_snapshot("akshare", "quotes", as_of, quotes)
@@ -363,22 +409,20 @@ class Workflow:
             events = self.database.get_risk_events(risk_start, as_of)
             unprocessed = self.database.unprocessed_official_codes(risk_start, as_of)
 
-            provisional = SignalRun(
-                as_of=as_of,
-                signal_kind=SignalKind.PRECLOSE_ENTRY,
-                strategy_version=self.settings.strategy_version_preclose,
-                information_cutoff=as_of,
-                data_as_of=as_of if data_fresh else None,
-                status=RunStatus.RUNNING,
-                data_fresh=data_fresh,
-                official_news_healthy=news.official_healthy,
-                mainstream_news_healthy=news.mainstream_healthy,
-                tradable=False,
-            )
+            provisional = draft.model_copy(
+                update={
+                    "data_as_of": as_of if data_fresh else None,
+                    "data_fresh": data_fresh,
+                    "official_news_healthy": news.official_healthy,
+                    "mainstream_news_healthy": news.mainstream_healthy,
+                }
+            ).transition_to(ResearchRunState.EVALUATING)
             morning_run = self.database.latest_signal_run(as_of.date(), SignalKind.MORNING_WATCHLIST.value)
             morning_codes: set[str] = set()
             if morning_run:
-                morning_frame = self.database.get_candidates(str(morning_run["run_id"]), include_blocked=False).head(10)
+                morning_frame = self.database.get_candidates(
+                    str(morning_run["run_id"]), include_blocked=False
+                ).head(self.settings.selection.top_n)
                 morning_codes = set(morning_frame["ts_code"].astype(str)) if not morning_frame.empty else set()
             scored = self.scoring.score(
                 provisional.run_id,
@@ -394,12 +438,12 @@ class Workflow:
             status = RunStatus.SUCCESS if tradable and news.mainstream_healthy else RunStatus.DEGRADED
             message_parts = news.messages.copy()
             if not data_fresh:
-                message_parts.append("实时行情缺失或超过60秒")
+                message_parts.append(f"实时行情缺失或超过{self.settings.quote_freshness_seconds}秒")
             if not eod_fresh:
                 message_parts.append(f"正式日线未更新到前一交易日 {expected_eod or 'unknown'}")
             if research_outside_window and not window_ok:
                 message_parts.append("窗口外研究运行，不生成模拟订单")
-            run = provisional.model_copy(
+            staged = provisional.model_copy(
                 update={
                     "status": status,
                     "tradable": tradable,
@@ -413,19 +457,23 @@ class Workflow:
                         "news": news.__dict__,
                     },
                 }
-            )
-            self.database.save_signal_run(run)
-            self.database.save_candidates(scored.candidates)
-            orders = self.portfolio.create_candidate_orders(run, scored.candidates)
-            self._job_finish(
-                job_id,
-                "run-preclose",
-                started,
-                status.value,
-                run.message,
-                candidates=run.candidate_count,
-                orders=len(orders),
-                tradable=run.tradable,
+            ).transition_to(ResearchRunState.STAGED)
+            run = staged.transition_to(ResearchRunState.PUBLISHED)
+            orders = self.portfolio.plan_candidate_orders(run, scored.candidates)
+            self.run_uow.commit(
+                run,
+                scored.candidates,
+                orders,
+                self._job_completion(
+                    job_id,
+                    "run-preclose",
+                    started,
+                    status.value,
+                    run.message,
+                    candidates=run.candidate_count,
+                    orders=len(orders),
+                    tradable=run.tradable,
+                ),
             )
             return run
         except Exception as exc:
@@ -438,10 +486,12 @@ class Workflow:
             as_of = as_of.replace(tzinfo=SHANGHAI_TZ)
         started = datetime.now(SHANGHAI_TZ)
         job_id = self._job_start("run-morning", started)
-        window_ok = time(8, 25) <= as_of.time() <= time(8, 35)
+        window_ok = self.settings.schedule.morning_window.contains(as_of)
         if not self.database.is_trading_day(as_of.date()) or (not window_ok and not research_outside_window):
             message = (
-                "交易日历未确认当日开市" if not self.database.is_trading_day(as_of.date()) else "不在08:25至08:35窗口内"
+                "交易日历未确认当日开市"
+                if not self.database.is_trading_day(as_of.date())
+                else f"不在{self.settings.schedule.morning_window.describe()}窗口内"
             )
             run = SignalRun(
                 as_of=as_of,
@@ -455,10 +505,26 @@ class Workflow:
                 tradable=False,
                 message=message,
             )
-            self.database.save_signal_run(run)
-            self._job_finish(job_id, "run-morning", started, "missed", message)
+            self.run_uow.commit(
+                run,
+                [],
+                [],
+                self._job_completion(job_id, "run-morning", started, "missed", message),
+            )
             return run
         try:
+            draft = SignalRun(
+                as_of=as_of,
+                signal_kind=SignalKind.MORNING_WATCHLIST,
+                strategy_version=self.settings.strategy_version_morning,
+                information_cutoff=as_of,
+                status=RunStatus.RUNNING,
+                lifecycle_state=ResearchRunState.CREATED,
+                data_fresh=False,
+                official_news_healthy=False,
+                mainstream_news_healthy=False,
+                tradable=False,
+            ).transition_to(ResearchRunState.COLLECTING_DATA)
             news_start = datetime.combine((as_of - timedelta(days=10)).date(), time(0), tzinfo=SHANGHAI_TZ)
             news = self._sync_news(news_start, as_of)
             bars = self.database.get_recent_daily_bars(150, as_of=as_of.date() - timedelta(days=1))
@@ -471,18 +537,18 @@ class Workflow:
             )
             events = self.database.get_risk_events(risk_start, as_of)
             unprocessed = self.database.unprocessed_official_codes(risk_start, as_of)
-            provisional = SignalRun(
-                as_of=as_of,
-                signal_kind=SignalKind.MORNING_WATCHLIST,
-                strategy_version=self.settings.strategy_version_morning,
-                information_cutoff=as_of,
-                data_as_of=datetime.combine(expected_eod, time(15), tzinfo=SHANGHAI_TZ) if expected_eod else None,
-                status=RunStatus.RUNNING,
-                data_fresh=eod_fresh,
-                official_news_healthy=news.official_healthy,
-                mainstream_news_healthy=news.mainstream_healthy,
-                tradable=False,
-            )
+            provisional = draft.model_copy(
+                update={
+                    "data_as_of": datetime.combine(
+                        expected_eod, self.settings.schedule.market_close, tzinfo=SHANGHAI_TZ
+                    )
+                    if expected_eod
+                    else None,
+                    "data_fresh": eod_fresh,
+                    "official_news_healthy": news.official_healthy,
+                    "mainstream_news_healthy": news.mainstream_healthy,
+                }
+            ).transition_to(ResearchRunState.EVALUATING)
             scored = self.scoring.score_morning(
                 provisional.run_id,
                 self.database.get_securities(),
@@ -497,7 +563,7 @@ class Workflow:
                 messages.append(f"正式日线未更新到前一交易日 {expected_eod or 'unknown'}")
             if research_outside_window and not window_ok:
                 messages.append("窗口外研究运行")
-            run = provisional.model_copy(
+            staged = provisional.model_copy(
                 update={
                     "status": status,
                     "message": "; ".join(messages) or "ok",
@@ -508,10 +574,21 @@ class Workflow:
                         "eod_fresh": eod_fresh,
                     },
                 }
+            ).transition_to(ResearchRunState.STAGED)
+            run = staged.transition_to(ResearchRunState.PUBLISHED)
+            self.run_uow.commit(
+                run,
+                scored.candidates,
+                [],
+                self._job_completion(
+                    job_id,
+                    "run-morning",
+                    started,
+                    status.value,
+                    run.message,
+                    candidates=run.candidate_count,
+                ),
             )
-            self.database.save_signal_run(run)
-            self.database.save_candidates(scored.candidates)
-            self._job_finish(job_id, "run-morning", started, status.value, run.message, candidates=run.candidate_count)
             return run
         except Exception as exc:
             self._job_finish(job_id, "run-morning", started, "failed", str(exc))
@@ -534,8 +611,14 @@ class Workflow:
             at = at.replace(tzinfo=SHANGHAI_TZ)
         started = datetime.now(SHANGHAI_TZ)
         job_id = self._job_start("capture-fill", started)
-        if not (time(14, 43) <= at.time() <= time(14, 50)):
-            self._job_finish(job_id, "capture-fill", started, "missed", "不在14:43至14:50成交窗口")
+        if not self.settings.schedule.fill_window.contains(at):
+            self._job_finish(
+                job_id,
+                "capture-fill",
+                started,
+                "missed",
+                f"不在{self.settings.schedule.fill_window.describe()}成交窗口",
+            )
             return []
         try:
             run = self.database.latest_signal_run(at.date(), SignalKind.PRECLOSE_ENTRY.value)
@@ -552,9 +635,8 @@ class Workflow:
             self._job_finish(job_id, "capture-fill", started, "failed", str(exc))
             raise
 
-    @staticmethod
-    def _in_trading_session(at: datetime) -> bool:
-        return time(9, 30) <= at.time() <= time(11, 30) or time(13, 0) <= at.time() <= time(15, 0)
+    def _in_trading_session(self, at: datetime) -> bool:
+        return self.settings.schedule.is_trading_session(at)
 
     def monitor_paper(self, at: datetime | None = None) -> list[object]:
         at = at or datetime.now(SHANGHAI_TZ)
@@ -581,7 +663,11 @@ class Workflow:
         job_id = self._job_start("run-postclose", started)
         try:
             run = self.database.latest_signal_run(at.date(), SignalKind.PRECLOSE_ENTRY.value)
-            run_time = run["as_of"] if run else datetime.combine(at.date(), time(14, 40), tzinfo=SHANGHAI_TZ)
+            run_time = (
+                run["as_of"]
+                if run
+                else datetime.combine(at.date(), self.settings.schedule.preclose_run_at, tzinfo=SHANGHAI_TZ)
+            )
             news_start = datetime.combine((at - timedelta(days=10)).date(), time(0, 0), tzinfo=SHANGHAI_TZ)
             news = self._sync_news(news_start, at)
             self.evaluate_morning(at)
@@ -591,12 +677,16 @@ class Workflow:
             context = {
                 "report_date": at.date().isoformat(),
                 "signal_as_of": str(run_time),
-                "candidates": candidates.head(10).to_dict("records"),
+                "preclose_label": self.settings.schedule.preclose_run_at.strftime("%H:%M"),
+                "candidates": candidates.head(self.settings.selection.top_n).to_dict("records"),
                 "positions": self.database.get_open_positions().to_dict("records"),
                 "cash": self.database.get_cash(),
                 "after_entry_events": events.to_dict("records"),
                 "news_health": news.__dict__,
-                "required_disclaimer": "收盘后未知公告无法由14:40系统提前预测，属于不可消除的隔夜风险。",
+                "required_disclaimer": (
+                    "收盘后未知公告无法由"
+                    f"{self.settings.schedule.preclose_run_at:%H:%M}系统提前预测，属于不可消除的隔夜风险。"
+                ),
             }
             report = ReportService(
                 self.database, self.optional_llm(), self.settings.report_dir, self.settings.llm_report_model

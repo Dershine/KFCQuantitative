@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, time
+from datetime import datetime
 
 import pandas as pd
 
@@ -98,7 +98,7 @@ class PortfolioService:
         self.live_provider = live_provider
         self.fees = FeeModel(settings)
 
-    def create_candidate_orders(self, run: SignalRun, candidates: list[CandidateScore]) -> list[PaperOrder]:
+    def plan_candidate_orders(self, run: SignalRun, candidates: list[CandidateScore]) -> list[PaperOrder]:
         if not run.tradable:
             return []
         positions = self.database.get_open_positions()
@@ -107,10 +107,10 @@ class PortfolioService:
         if available_slots <= 0:
             return []
         target_value = self.settings.initial_cash * self.settings.position_fraction
-        created: list[PaperOrder] = []
-        # Create reserve orders through rank 10. capture_fill fills in rank order until slots are full.
+        planned: list[PaperOrder] = []
+        # Reserve orders are bounded by the shared selection policy; fills still stop when slots are full.
         for candidate in candidates:
-            if candidate.rank > 10 or candidate.blocked or candidate.ts_code in held:
+            if candidate.rank > self.settings.selection.top_n or candidate.blocked or candidate.ts_code in held:
                 continue
             order = PaperOrder(
                 run_id=run.run_id,
@@ -118,8 +118,17 @@ class PortfolioService:
                 side=OrderSide.BUY,
                 created_at=run.as_of,
                 target_value=target_value,
-                reason=f"14:40机会评分 {candidate.opportunity_score:.2f}，排名 {candidate.rank}",
+                reason=(
+                    f"{self.settings.schedule.preclose_run_at.strftime('%H:%M')}机会评分 "
+                    f"{candidate.opportunity_score:.2f}，排名 {candidate.rank}"
+                ),
             )
+            planned.append(order)
+        return planned
+
+    def create_candidate_orders(self, run: SignalRun, candidates: list[CandidateScore]) -> list[PaperOrder]:
+        created: list[PaperOrder] = []
+        for order in self.plan_candidate_orders(run, candidates):
             if self.database.save_order(order):
                 created.append(order)
         return created
@@ -143,16 +152,26 @@ class PortfolioService:
                 continue
             current = current_map.get(code)
             if current is None:
-                self.database.reject_order(str(order_row["order_id"]), "14:45无实时行情")
+                self.database.reject_order(
+                    str(order_row["order_id"]),
+                    f"{self.settings.schedule.fill_at.strftime('%H:%M')}无实时行情",
+                )
                 continue
             signal_quote = self.database.get_quote_near(code, pd.Timestamp(order_row["created_at"]).to_pydatetime())
             if signal_quote is None:
-                self.database.reject_order(str(order_row["order_id"]), "缺少14:40基准快照")
+                self.database.reject_order(
+                    str(order_row["order_id"]),
+                    f"缺少{self.settings.schedule.preclose_run_at.strftime('%H:%M')}基准快照",
+                )
                 continue
             delta_volume = float(current["volume"]) - float(signal_quote["volume"])
             delta_amount = float(current["amount"]) - float(signal_quote["amount"])
             if delta_volume <= 0 or delta_amount <= 0:
-                self.database.reject_order(str(order_row["order_id"]), "14:40至14:45无可验证成交")
+                self.database.reject_order(
+                    str(order_row["order_id"]),
+                    f"{self.settings.schedule.preclose_run_at.strftime('%H:%M')}至"
+                    f"{self.settings.schedule.fill_at.strftime('%H:%M')}无可验证成交",
+                )
                 continue
             raw_vwap = delta_amount / delta_volume
             pre_close = float(current["pre_close"])
@@ -232,7 +251,7 @@ class PortfolioService:
             position = PaperPosition.model_validate(row)
             if position.opened_trade_date >= at.date():
                 continue  # T+1: no same-day exit.
-            start = datetime.combine(at.date(), time(9, 30), tzinfo=at.tzinfo)
+            start = datetime.combine(at.date(), self.settings.schedule.market_morning_open, tzinfo=at.tzinfo)
             bars = sorted(
                 self.live_provider.fetch_intraday_bars(position.ts_code, start, at, 5), key=lambda bar: bar.start_at
             )
@@ -256,7 +275,7 @@ class PortfolioService:
                 continue
 
             holding_days = self.database.count_trading_days(position.opened_trade_date, at.date())
-            if at.time() >= time(self.settings.preclose_hour, self.settings.preclose_minute):
+            if at.time() >= self.settings.schedule.preclose_run_at:
                 candidate = score_map.get(position.ts_code)
                 reason: str | None = None
                 if can_reassess and candidate and bool(candidate.get("blocked")):

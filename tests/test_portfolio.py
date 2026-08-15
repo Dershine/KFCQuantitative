@@ -238,3 +238,42 @@ def test_missing_today_signal_does_not_force_score_exit(settings):
     result = service.monitor_positions(entry_at + timedelta(days=1))
     assert result == []
     assert database.get_open_positions().iloc[0]["status"] == "open"
+
+
+def test_order_reserve_count_uses_shared_selection_policy(settings):
+    configured = settings.model_copy(
+        update={
+            "max_positions": 2,
+            "position_fraction": 0.5,
+            "selection": settings.selection.model_copy(update={"top_n": 2, "candidate_limit": 3}),
+        }
+    )
+    database = Database(configured.database_path, configured.initial_cash)
+    database.initialize()
+    service = PortfolioService(database, configured, FakeLive())
+    signal_at = datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ)
+    run = SignalRun(
+        run_id="selection-limit",
+        as_of=signal_at,
+        status=RunStatus.SUCCESS,
+        data_fresh=True,
+        official_news_healthy=True,
+        mainstream_news_healthy=True,
+        tradable=True,
+    )
+    candidates = [
+        CandidateScore(
+            run_id=run.run_id,
+            ts_code=code,
+            name=code,
+            rank=rank,
+            opportunity_score=80 - rank,
+            factor_breakdown=factor(),
+            quote_at=signal_at,
+        )
+        for rank, code in enumerate(("600000.SH", "601001.SH", "603001.SH"), start=1)
+    ]
+
+    created = service.create_candidate_orders(run, candidates)
+
+    assert [order.ts_code for order in created] == ["600000.SH", "601001.SH"]

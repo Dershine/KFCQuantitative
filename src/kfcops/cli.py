@@ -17,9 +17,7 @@ def main() -> None:
 
 @app.command()
 def serve(host: str = "127.0.0.1", port: int = 8600) -> None:
-    settings = OpsSettings()
-    if settings.session_secret == "change-me":
-        raise typer.BadParameter("KFCOPS_SESSION_SECRET must be configured")
+    OpsSettings()  # Validate before handing control to the server factory.
     uvicorn.run("kfcops.web:create_app", host=host, port=port, factory=True, proxy_headers=True)
 
 

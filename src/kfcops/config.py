@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from datetime import time
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,4 +26,22 @@ class OpsSettings(BaseSettings):
     session_secret: str = "change-me"
     research_health_url: str = "http://127.0.0.1:8501/research/_stcore/health"
     timezone: str = "Asia/Shanghai"
-    backup_retention: int = 7
+    backup_retention: int = Field(default=7, ge=1, le=365)
+    protected_window_start: time = time(8, 15)
+    protected_window_end: time = time(15, 10)
+
+    @model_validator(mode="after")
+    def validate_runtime_safety(self) -> OpsSettings:
+        if self.session_secret == "change-me" or len(self.session_secret.strip()) < 32:
+            raise ValueError("session_secret must be configured with at least 32 characters")
+        if self.protected_window_start >= self.protected_window_end:
+            raise ValueError("protected window start must be before protected window end")
+        if self.research_health_url.startswith(("http://", "https://")) is False:
+            raise ValueError("research_health_url must use http or https")
+        if self.github_repository.count("/") != 1 or any(not part for part in self.github_repository.split("/")):
+            raise ValueError("github_repository must use owner/repository format")
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"unknown timezone: {self.timezone}") from exc
+        return self

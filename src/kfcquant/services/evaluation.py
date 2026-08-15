@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime
 
 from kfcquant.config import Settings
 from kfcquant.db import Database
@@ -16,7 +16,9 @@ class CandidateEvaluationService:
 
     def evaluate(self, run: dict[str, object], evaluation_date: datetime) -> list[CandidateOutcome]:
         kind = SignalKind(str(run["signal_kind"]))
-        candidates = self.database.get_candidates(str(run["run_id"]), include_blocked=False).head(10)
+        candidates = self.database.get_candidates(str(run["run_id"]), include_blocked=False).head(
+            self.settings.selection.top_n
+        )
         outcomes: list[CandidateOutcome] = []
         signal_at = run["as_of"]
         if not isinstance(signal_at, datetime):
@@ -24,8 +26,12 @@ class CandidateEvaluationService:
         for candidate in candidates.to_dict("records"):
             code = str(candidate["ts_code"])
             if kind == SignalKind.MORNING_WATCHLIST:
-                baseline_start = datetime.combine(signal_at.date(), time(9, 30), tzinfo=signal_at.tzinfo)
-                window_end = datetime.combine(signal_at.date(), time(14, 40), tzinfo=signal_at.tzinfo)
+                baseline_start = datetime.combine(
+                    signal_at.date(), self.settings.schedule.market_morning_open, tzinfo=signal_at.tzinfo
+                )
+                window_end = datetime.combine(
+                    signal_at.date(), self.settings.schedule.preclose_run_at, tzinfo=signal_at.tzinfo
+                )
                 morning_bars = sorted(
                     self.live_provider.fetch_intraday_bars(code, baseline_start, window_end, 5),
                     key=lambda item: item.start_at,
@@ -33,10 +39,20 @@ class CandidateEvaluationService:
                 baseline_bars = morning_bars[:1]
                 evaluation_bars = morning_bars[1:]
             else:
-                baseline_start = datetime.combine(signal_at.date(), time(14, 40), tzinfo=signal_at.tzinfo)
-                baseline_end = datetime.combine(signal_at.date(), time(14, 45), tzinfo=signal_at.tzinfo)
-                evaluation_start = datetime.combine(evaluation_date.date(), time(9, 30), tzinfo=evaluation_date.tzinfo)
-                window_end = datetime.combine(evaluation_date.date(), time(15), tzinfo=evaluation_date.tzinfo)
+                baseline_start = datetime.combine(
+                    signal_at.date(), self.settings.schedule.preclose_run_at, tzinfo=signal_at.tzinfo
+                )
+                baseline_end = datetime.combine(
+                    signal_at.date(), self.settings.schedule.fill_at, tzinfo=signal_at.tzinfo
+                )
+                evaluation_start = datetime.combine(
+                    evaluation_date.date(),
+                    self.settings.schedule.market_morning_open,
+                    tzinfo=evaluation_date.tzinfo,
+                )
+                window_end = datetime.combine(
+                    evaluation_date.date(), self.settings.schedule.market_close, tzinfo=evaluation_date.tzinfo
+                )
                 baseline_bars = sorted(
                     self.live_provider.fetch_intraday_bars(code, baseline_start, baseline_end, 5),
                     key=lambda item: item.start_at,

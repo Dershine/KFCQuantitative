@@ -21,7 +21,7 @@ def ops_settings(tmp_path):
         research_database=tmp_path / "research.duckdb",
         backup_directory=tmp_path / "backups",
         github_repository="owner/repository",
-        session_secret="test-secret",
+        session_secret="test-secret-that-is-at-least-32-bytes",
     )
 
 

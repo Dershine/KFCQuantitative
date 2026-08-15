@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class SourceTier(StrEnum):
@@ -44,6 +44,43 @@ class RunStatus(StrEnum):
     DEGRADED = "degraded"
     FAILED = "failed"
     MISSED = "missed"
+
+
+class ResearchRunState(StrEnum):
+    CREATED = "created"
+    COLLECTING_DATA = "collecting_data"
+    EVALUATING = "evaluating"
+    STAGED = "staged"
+    PUBLISHED = "published"
+    EVALUATED = "evaluated"
+    DEGRADED = "degraded"
+    FAILED = "failed"
+    MISSED = "missed"
+
+
+READABLE_RESEARCH_RUN_STATES = frozenset(
+    {
+        ResearchRunState.PUBLISHED,
+        ResearchRunState.EVALUATED,
+        ResearchRunState.DEGRADED,
+        ResearchRunState.FAILED,
+        ResearchRunState.MISSED,
+    }
+)
+
+_RESEARCH_RUN_TRANSITIONS: dict[ResearchRunState, frozenset[ResearchRunState]] = {
+    ResearchRunState.CREATED: frozenset(
+        {ResearchRunState.COLLECTING_DATA, ResearchRunState.FAILED, ResearchRunState.MISSED}
+    ),
+    ResearchRunState.COLLECTING_DATA: frozenset({ResearchRunState.EVALUATING, ResearchRunState.FAILED}),
+    ResearchRunState.EVALUATING: frozenset({ResearchRunState.STAGED, ResearchRunState.FAILED}),
+    ResearchRunState.STAGED: frozenset({ResearchRunState.PUBLISHED, ResearchRunState.FAILED}),
+    ResearchRunState.PUBLISHED: frozenset({ResearchRunState.EVALUATED, ResearchRunState.DEGRADED}),
+    ResearchRunState.EVALUATED: frozenset(),
+    ResearchRunState.DEGRADED: frozenset(),
+    ResearchRunState.FAILED: frozenset(),
+    ResearchRunState.MISSED: frozenset(),
+}
 
 
 class SignalKind(StrEnum):
@@ -194,6 +231,7 @@ class SignalRun(BaseModel):
     information_cutoff: datetime | None = None
     data_as_of: datetime | None = None
     status: RunStatus
+    lifecycle_state: ResearchRunState | None = None
     data_fresh: bool
     official_news_healthy: bool
     mainstream_news_healthy: bool
@@ -201,6 +239,37 @@ class SignalRun(BaseModel):
     message: str = ""
     candidate_count: int = 0
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def infer_legacy_lifecycle_state(self) -> Self:
+        if self.lifecycle_state is not None:
+            return self
+        inferred = {
+            RunStatus.SUCCESS: ResearchRunState.PUBLISHED,
+            RunStatus.DEGRADED: ResearchRunState.PUBLISHED,
+            RunStatus.FAILED: ResearchRunState.FAILED,
+            RunStatus.MISSED: ResearchRunState.MISSED,
+            RunStatus.RUNNING: ResearchRunState.EVALUATING,
+        }[self.status]
+        self.lifecycle_state = inferred
+        return self
+
+    def transition_to(self, target: ResearchRunState) -> Self:
+        current = self.lifecycle_state
+        if current is None:
+            raise ValueError("research run lifecycle state was not initialized")
+        if target == current:
+            return self
+        if target not in _RESEARCH_RUN_TRANSITIONS[current]:
+            raise ValueError(f"illegal research run transition: {current.value} -> {target.value}")
+        updates: dict[str, object] = {"lifecycle_state": target}
+        if target == ResearchRunState.FAILED:
+            updates.update(status=RunStatus.FAILED, tradable=False)
+        elif target == ResearchRunState.MISSED:
+            updates.update(status=RunStatus.MISSED, tradable=False)
+        elif target == ResearchRunState.DEGRADED:
+            updates.update(status=RunStatus.DEGRADED, tradable=False)
+        return self.model_copy(update=updates)
 
 
 class CandidateOutcome(BaseModel):

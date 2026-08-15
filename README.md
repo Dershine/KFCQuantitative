@@ -135,6 +135,8 @@ BaoStock按股票读取整个历史区间并分批写入DuckDB和Parquet。首�
 .\scripts\register_tasks.ps1
 ```
 
+注册脚本会先读取应用的类型化调度配置并执行完整校验，再创建Windows计划任务；Linux Scheduler使用同一个配置源。非法的时间顺序、窗口或选股上限会在启动/注册前被拒绝，不会以部分配置继续运行。
+
 - 交易时段每5分钟：检查已有持仓退出；
 - 08:00：确认交易日历；
 - 08:30：生成盘前观察名单；
@@ -143,6 +145,21 @@ BaoStock按股票读取整个历史区间并分批写入DuckDB和Parquet。首�
 - 14:45：模拟成交；
 - 18:10：同步BaoStock正式日线（免费源发布时间晚于商业数据）；
 - 20:30：同步资讯并生成复盘。
+
+如需调整默认时刻或候选上限，使用嵌套环境变量，并同步调整相关触发点与安全窗口。例如：
+
+```dotenv
+KFCQUANT_SCHEDULE__PRECLOSE_RUN_AT=14:40
+KFCQUANT_SCHEDULE__PRECLOSE_WINDOW_START=14:35
+KFCQUANT_SCHEDULE__PRECLOSE_WINDOW_END=14:43
+KFCQUANT_SCHEDULE__FILL_AT=14:45
+KFCQUANT_SCHEDULE__FILL_WINDOW_START=14:43
+KFCQUANT_SCHEDULE__FILL_WINDOW_END=14:50
+KFCQUANT_SELECTION__TOP_N=10
+KFCQUANT_SELECTION__CANDIDATE_LIMIT=100
+```
+
+`TOP_N`同时约束早盘连续性、评估、报告和候选订单，且不能小于最大持仓数；`CANDIDATE_LIMIT`不能小于`TOP_N`。可用 `kfcquant schedule-plan --json`查看校验后的实际注册计划。
 
 本机必须保持开机和联网。错过的窗口记录为`missed`，不会事后伪造成交。网页关闭不影响计划任务。
 
@@ -241,6 +258,8 @@ sudo bash /opt/kfcquant/app/deploy/deploy_server.sh <完整40位commit SHA>
 ```
 
 发布管理器依次验证GitHub Actions、检查交易窗口和运行中任务、拉取Git提交、停止研究服务、备份DuckDB、安装锁定依赖、迁移、启动并执行健康检查。失败时自动恢复上一提交和部署前数据库备份，默认保留最近7份备份。
+
+Research与Operations配置在进程启动前统一校验。Operations的`KFCOPS_SESSION_SECRET`必须是至少32字符的非默认值；矛盾的保护窗口、非法Provider、无效费用/仓位比例或缺少所选Tushare模式的Token都会使启动失败关闭。
 
 手动回滚会消费当前的回滚点；回滚成功后，下一次正常发布会重新建立新的数据库备份和上一版本记录。
 

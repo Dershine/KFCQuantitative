@@ -108,6 +108,15 @@ def scheduler() -> None:
     run_scheduler(get_settings())
 
 
+@app.command("schedule-plan")
+def schedule_plan(as_json: bool = typer.Option(False, "--json", help="输出机器可读JSON")) -> None:
+    payload = get_settings().schedule.registration_plan()
+    if as_json:
+        console.print_json(json.dumps(payload, ensure_ascii=False))
+    else:
+        console.print(payload)
+
+
 @app.command("capture-fill")
 def capture_fill() -> None:
     fills = _workflow().capture_fill()

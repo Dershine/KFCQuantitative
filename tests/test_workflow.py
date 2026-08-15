@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pandas as pd
 
@@ -106,6 +106,39 @@ def test_preclose_outside_window_is_recorded_missed(settings):
     run = workflow.run_preclose(datetime(2026, 8, 10, 16, 0, tzinfo=SHANGHAI_TZ))
     assert run.status.value == "missed"
     assert not run.tradable
+
+
+def test_preclose_runtime_gate_uses_configured_schedule_policy(settings):
+    at = datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ)
+    custom_schedule = settings.schedule.model_copy(
+        update={
+            "morning_evaluation_at": time(14, 25),
+            "preclose_run_at": time(14, 30),
+            "preclose_window_start": time(14, 25),
+            "preclose_window_end": time(14, 33),
+            "fill_at": time(14, 35),
+            "fill_window_start": time(14, 33),
+            "fill_window_end": time(14, 40),
+        }
+    )
+    configured = settings.model_copy(update={"schedule": custom_schedule})
+    database = Database(configured.database_path, configured.initial_cash)
+    database.initialize()
+    database.upsert_trade_calendar(
+        pd.DataFrame([{"cal_date": at.date(), "is_open": True, "pretrade_date": date(2026, 8, 7)}])
+    )
+    workflow = Workflow(
+        configured,
+        database=database,
+        market_provider=FakeMarket(),
+        live_provider=FakeLive(pd.DataFrame()),
+        llm_provider=FakeLLM(),
+    )
+
+    run = workflow.run_preclose(at)
+
+    assert run.status.value == "missed"
+    assert "14:25至14:33" in run.message
 
 
 def test_preclose_fails_closed_when_calendar_does_not_confirm_open(settings):

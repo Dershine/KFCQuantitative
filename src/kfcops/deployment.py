@@ -9,7 +9,6 @@ import subprocess
 import threading
 import time
 from datetime import datetime
-from datetime import time as wall_time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -271,7 +270,7 @@ class DeploymentManager:
                         is_open = bool(row and row[0])
             except Exception:
                 is_open = True
-        return is_open and wall_time(8, 15) <= now.time() <= wall_time(15, 10)
+        return is_open and self.settings.protected_window_start <= now.time() <= self.settings.protected_window_end
 
     def _research_job_running(self) -> bool:
         if not self.settings.research_database.exists():

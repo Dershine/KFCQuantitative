@@ -10,7 +10,7 @@
 | 首次建立 | 2026-08-15 |
 | 最近复核 | 2026-08-15 |
 | 项目版本基线 | `0.2.0` |
-| 源码基线 | `590a4fcee70360fcb85f117c4d5d92d887707a96` |
+| 源码基线 | `d41577776d8c86b3845ee3d110e76b5c9bf41ad6`（工作区） |
 | 适用范围 | Research Service、Operations Manager、数据与部署基础设施 |
 | 目标读者 | 项目维护者、策略开发者、代码审查者、部署维护者 |
 | 领域语言 | 以根目录 `CONTEXT.md` 为准 |
@@ -23,7 +23,6 @@
 - [项目与依赖声明](../pyproject.toml)
 - [生产依赖锁](../requirements.lock)
 - [持续集成工作流](../.github/workflows/ci-release.yml)
-- [阶段级架构推进Goal提示词](./KFCQ_GoalPrompt.md)
 
 ### 0.1 文档职责
 
@@ -100,7 +99,7 @@ KFCQuant 当前是一个面向个人使用、强调可审计和安全降级的 A
 | 单策略可维护性 | 中等 | 代码集中、测试较好，但评分职责较多 |
 | 多策略演进 | 偏低 | Strategy尚未成为一等架构对象 |
 | 严格可复现性 | 偏低 | 缺少完整Run Manifest、数据版本和Prompt版本 |
-| 故障恢复 | 中等 | 局部事务完善，但Signal发布不是整体原子操作 |
+| 故障恢复 | 中高 | Signal发布已整体原子化；Job租约与崩溃回收仍待完成 |
 | 可观测性 | 中等 | 有Job、心跳和健康状态，缺少结构化指标与告警 |
 | 回放与实验 | 偏低 | 有前向评估，尚无共享策略内核的历史Replay |
 
@@ -210,7 +209,10 @@ KFCQuantitative/
 │   ├── services/                 评分、资讯、组合、评估、报告和编排
 │   ├── models.py                 跨研究域模型
 │   ├── interfaces.py             Provider Protocol
-│   ├── db.py                     DuckDB Schema、迁移和全部Repository能力
+│   ├── policies.py               类型化调度、窗口和候选选择Policy
+│   ├── migrations.py             有序、事务化DuckDB迁移Runner
+│   ├── unit_of_work.py            Research Run原子发布事务边界
+│   ├── db.py                     DuckDB Schema、迁移注册和全部Repository能力
 │   ├── scheduler.py              APScheduler任务注册
 │   ├── cli.py                    Typer命令入口
 │   └── dashboard.py              Streamlit只读研究网页
@@ -244,7 +246,9 @@ flowchart TD
     Workflow --> Evaluation["CandidateEvaluationService"]
     Workflow --> Reports["ReportService"]
 
-    Workflow --> Database["Database"]
+    Workflow --> UoW["ResearchRunUnitOfWork"]
+    UoW --> Database["Database"]
+    Workflow --> Database
     News --> Database
     Portfolio --> Database
     Evaluation --> Database
@@ -351,7 +355,8 @@ flowchart TD
 - 所有连接使用同一个跨进程文件锁，包括只读连接；
 - 候选因子、风险ID和元数据以JSON保存，便于演进但不利于强约束查询；
 - 买卖成交已使用显式数据库事务；
-- Signal Run、Candidates、Orders和Job完成状态尚未形成统一事务。
+- Signal Run具有类型化生命周期，业务查询只消费明确可读终态；
+- Signal Run、Candidates、Orders和Job完成状态由Research Run UoW统一事务发布。
 
 ### 4.6 部署拓扑
 
@@ -374,12 +379,14 @@ flowchart TD
 | 检查 | 结果 |
 |---|---|
 | Ruff | 通过 |
-| Pytest | 42项通过 |
-| 总覆盖率 | 64% |
+| Pytest | 83项通过 |
+| 总覆盖率 | 71% |
 | `services/scoring.py` | 92% |
-| `db.py` | 86% |
-| `services/portfolio.py` | 79% |
-| `services/workflow.py` | 59% |
+| `db.py` | 89% |
+| `unit_of_work.py` | 100% |
+| `models.py` | 98% |
+| `services/portfolio.py` | 81% |
+| `services/workflow.py` | 61% |
 | CLI、Scheduler、Dashboard | 接近0%或未直接覆盖 |
 
 已有测试重点覆盖：
@@ -394,10 +401,11 @@ flowchart TD
 - 数据库迁移与跨进程锁；
 - 免费Provider标准化和降级；
 - 运维CSRF、SHA校验、保护窗口和回滚材料。
+- Run生命周期合法转换、终态可见性和旧状态迁移；
+- Signal Run、Candidates、Orders与Job完成的原子发布及四阶段故障回滚。
 
 尚未形成强保护的区域：
 
-- Signal发布的跨表原子性；
 - worker崩溃后的Job恢复；
 - Scheduler任务重叠与错过恢复；
 - Dashboard完整烟雾和数据契约；
@@ -438,10 +446,10 @@ flowchart TD
 
 | ID | 严重度 | 当前问题 | 影响 | 目标里程碑 | 状态 |
 |---|---|---|---|---|---|
-| TD-001 | CRITICAL | Signal Run、Candidates、Orders和Job完成分多次提交 | 崩溃后可能出现部分发布状态 | M1 | `NOT_STARTED` |
+| TD-001 | CRITICAL | Signal Run、Candidates、Orders和Job完成分多次提交 | 崩溃后可能出现部分发布状态 | M1 | `DONE` |
 | TD-002 | HIGH | `running` Job没有租约和崩溃回收 | stale记录可能长期阻止部署 | M1 | `NOT_STARTED` |
-| TD-003 | HIGH | 迁移逻辑集中在`initialize()`中的即席ALTER | 迁移顺序、失败恢复和兼容边界不清晰 | M1 | `NOT_STARTED` |
-| TD-004 | HIGH | 时间窗口、Top N和部分规则分散硬编码 | 配置漂移和行为不一致 | M1 | `NOT_STARTED` |
+| TD-003 | HIGH | 迁移逻辑集中在`initialize()`中的即席ALTER | 迁移顺序、失败恢复和兼容边界不清晰 | M1 | `DONE` |
+| TD-004 | HIGH | 时间窗口、Top N和部分规则分散硬编码 | 配置漂移和行为不一致 | M1 | `DONE` |
 | TD-005 | HIGH | Strategy不是一等接口 | 多策略、实验和Replay需要修改核心编排 | M2 | `NOT_STARTED` |
 | TD-006 | HIGH | 策略版本只是自由字符串 | 无法严格绑定代码、参数和因子定义 | M2 | `NOT_STARTED` |
 | TD-007 | HIGH | 缺少完整Run Manifest和数据快照引用 | 不能严格重放历史Signal Run | M3 | `NOT_STARTED` |
@@ -656,16 +664,25 @@ M0进度：`4 / 4 = 100%`
 
 | ID | 工作包 | 点数 | 主要交付物 | 验收标准 | 状态 |
 |---|---|---:|---|---|---|
-| M1-01 | Research Run Unit of Work | 5 | UoW接口和DuckDB实现 | 故障注入证明不会暴露部分Published Run | `NOT_STARTED` |
-| M1-02 | Run状态机 | 3 | 类型化状态与迁移规则 | 非法转换被拒绝；Dashboard只读允许终态 | `NOT_STARTED` |
+| M1-01 | Research Run Unit of Work | 5 | UoW接口和DuckDB实现 | 故障注入证明不会暴露部分Published Run | `DONE` |
+| M1-02 | Run状态机 | 3 | 类型化状态与迁移规则 | 非法转换被拒绝；Dashboard只读允许终态 | `DONE` |
 | M1-03 | Job租约与崩溃回收 | 3 | `heartbeat_at`、`lease_expires_at`、回收流程 | worker崩溃后过期Job不再永久阻塞部署 | `NOT_STARTED` |
 | M1-04 | 原子Upsert | 2 | 替换DELETE+INSERT路径 | 中途失败不丢失旧评估或报告 | `NOT_STARTED` |
-| M1-05 | 正式迁移框架 | 3 | 有序、幂等迁移与迁移测试 | 空库、旧库、重复执行、失败恢复均通过 | `NOT_STARTED` |
-| M1-06 | Schedule与Selection配置收口 | 3 | 类型化Policy | 时间窗口、调度、Top N不再多处硬编码 | `NOT_STARTED` |
-| M1-07 | 启动配置校验 | 2 | Research/Ops配置验证 | 默认secret、矛盾时间、无效比例和版本要求被拒绝 | `NOT_STARTED` |
+| M1-05 | 正式迁移框架 | 3 | 有序、幂等迁移与迁移测试 | 空库、旧库、重复执行、失败恢复均通过 | `DONE` |
+| M1-06 | Schedule与Selection配置收口 | 3 | 类型化Policy | 时间窗口、调度、Top N不再多处硬编码 | `DONE` |
+| M1-07 | 启动配置校验 | 2 | Research/Ops配置验证 | 默认secret、矛盾时间、无效比例和版本要求被拒绝 | `DONE` |
 | M1-08 | Python版本口径统一 | 1 | 代码、CI、文档一致 | Python 3.12合法环境通过doctor | `DONE` |
 
-M1进度：`1 / 22 = 4.5%`。M1-08证据：Python 3.12、3.13和3.11边界测试通过；Windows启动器、项目声明、CI、依赖锁、README和Linux bootstrap版本契约测试通过；PowerShell语法检查通过。完成条件：全部工作包为`DONE`，并通过Run中断恢复场景测试。
+M1进度：`17 / 22 = 77.3%`。
+
+- M1-01证据：`ResearchRunUnitOfWork` Protocol与DuckDB实现将Run、Candidates、Orders和Job终态置于单一事务；Run/Candidates/Orders/Job四个注入点均全量回滚；工作流中断后无部分可见数据，安全重试产生一份完整发布；相同发布重复提交幂等，冲突发布被拒绝。
+- M1-02证据：Research Run生命周期与转换表已类型化；非法转换被拒绝；业务查询和Dashboard只读取Published或明确定义的可读终态；Schema v3完成旧`success/degraded/running/failed/missed`映射并保持旧发布写入兼容。
+- M1-05证据：正式迁移注册表与逐迁移事务Runner已替代`initialize()`即席ALTER；空库初始化、旧`signal_runs`升级、重复执行、中途SQL失败回滚、修复后恢复均通过；M1-A验收时Schema版本为2，本阶段经同一Runner有序升至3并保持旧发布写入兼容。
+- M1-06证据：Schedule/Selection Policy驱动Workflow窗口、APScheduler、Windows任务注册、候选存储、早盘连续性、订单、评估、报告和Dashboard；非默认14:30场景贯穿调度计划、运行门禁、3个持久化候选与2个订单。
+- M1-07证据：Pydantic启动校验覆盖默认/短Ops secret、保护窗口、Research任务时序、Provider、Tushare Token、费用、仓位比例、候选上限和策略版本格式；Research/Ops各入口共享同一Settings校验。
+- M1-08证据：Python 3.12、3.13和3.11边界测试通过；Windows启动器、项目声明、CI、依赖锁、README和Linux bootstrap版本契约测试通过。
+
+M1完成条件仍为全部工作包`DONE`并通过Run中断恢复场景测试。
 
 ### M2：策略内核与多策略基础
 
@@ -749,13 +766,13 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 | 里程碑 | DONE点数 | 总点数 | 完成度 | 状态 | 最近证据 |
 |---|---:|---:|---:|---|---|
 | M0 架构基线与治理 | 4 | 4 | 100% | `DONE` | 2026-08-15建立本文档并验证现有测试 |
-| M1 正确性、原子性与恢复 | 1 | 22 | 4.5% | `IN_PROGRESS` | 2026-08-15完成M1-08；42项测试、Ruff和pip check通过 |
+| M1 正确性、原子性与恢复 | 17 | 22 | 77.3% | `IN_PROGRESS` | 2026-08-15完成M1-B；83项测试、Ruff、原子发布故障恢复、迁移兼容和pip check通过 |
 | M2 策略内核与多策略基础 | 0 | 32 | 0% | `NOT_STARTED` | — |
 | M3 数据契约、血缘与LLM治理 | 0 | 30 | 0% | `NOT_STARTED` | — |
 | M4 Replay与策略实验 | 0 | 30 | 0% | `NOT_STARTED` | — |
 | M5 模块化、可观测性与质量门禁 | 0 | 32 | 0% | `NOT_STARTED` | — |
 | M6 发布强化与规模决策 | 0 | 18 | 0% | `NOT_STARTED` | — |
-| **总体** | **5** | **168** | **3.0%** | `IN_PROGRESS` | M0完成；M1-08完成 |
+| **总体** | **21** | **168** | **12.5%** | `IN_PROGRESS` | M0、M1-A、M1-B完成 |
 
 ### 12.1 当前建议的下一工程阶段
 
@@ -763,11 +780,13 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 
 | 阶段ID | 阶段名称 | 工作包 | 点数 | 依赖 | 状态 | 阶段验收目标 |
 |---|---|---|---:|---|---|---|
-| M1-A | 配置与迁移底座 | M1-06、M1-07、M1-05 | 8 | M1-08 | `NOT_STARTED` | 配置只有一个事实来源；非法启动配置被拒绝；迁移在空库、旧库、重复执行和失败恢复场景通过 |
-| M1-B | Run状态与原子发布 | M1-02、M1-01 | 8 | M1-A | `NOT_STARTED` | Run状态转换受控；故障注入证明外部不会看到部分Published Run |
+| M1-A | 配置与迁移底座 | M1-06、M1-07、M1-05 | 8 | M1-08 | `DONE` | 配置只有一个事实来源；非法启动配置被拒绝；迁移在空库、旧库、重复执行和失败恢复场景通过 |
+| M1-B | Run状态与原子发布 | M1-02、M1-01 | 8 | M1-A | `DONE` | Run状态转换受控；故障注入证明外部不会看到部分Published Run |
 | M1-C | 崩溃回收与原子更新 | M1-03、M1-04 | 5 | M1-B | `NOT_STARTED` | 过期Job可回收；中途失败不丢失旧评估或报告；M1中断恢复场景通过 |
 
-当前建议的下一工程阶段是`M1-A`，阶段内建议顺序为M1-06 → M1-07 → M1-05。M1-C完成并通过M1里程碑验收后再开始M2。
+`M1-A`已完成，阶段验收证据为：非默认Schedule/Selection从注册计划贯穿Pre-close运行与订单选择；空库、旧库、重复迁移、失败回滚与恢复通过；Ruff、60项全量测试、66%总覆盖率、pip check和PowerShell语法检查通过。
+
+`M1-B`已完成，阶段验收证据为：Run生命周期合法/非法转换、终态读取边界与五类旧状态升级通过；Pre-close离线端到端在一个事务发布Run、Candidates、Orders和Job终态；四阶段故障注入均无部分可见数据且中断后可安全重试；Morning仍不创建买单，非交易Run与blocked Candidate的买单被拒绝；Ruff、83项全量测试、71%总覆盖率和pip check通过。当前建议的下一工程阶段是`M1-C`，顺序为M1-03 → M1-04；M1-C完成并通过M1里程碑验收后再开始M2。
 
 ### 12.2 阶段级Goal执行规则
 
@@ -777,7 +796,7 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 - 默认不得跨越当前工程阶段或里程碑；确有不可分割的前置工作时，必须在编码前说明并把它纳入阶段范围；
 - 如果路线尚未定义阶段，应在编码前把相邻工作包组织成满足上述规模的阶段，记录阶段ID、范围、依赖和验收目标；
 - 只有整个阶段满足第13.3节的完成规则时，阶段级Goal才能结束；
-- 可复用的完整执行契约见`doc/KFCQ_GoalPrompt.md`。
+- 阶段级Goal执行时以调用方提供的完整执行契约为准，并将实际证据回写本文。
 
 ---
 
@@ -969,7 +988,6 @@ worker_heartbeat_age_seconds
 | `README.md` | 安装、运行、部署和用户入口 |
 | `CONTEXT.md` | 无实现细节的领域词汇表 |
 | `doc/KFCQ_TechnicalSummary.md` | 当前架构、目标路线、技术债和进度 |
-| `doc/KFCQ_GoalPrompt.md` | 阶段级架构推进的可复用Goal执行契约 |
 | 后续运行手册 | 故障处理、备份恢复、告警与值守 |
 | 后续策略说明 | 单个策略的假设、因子、参数和实验结果 |
 | 后续ADR | 难以逆转且存在真实权衡的架构决策 |
@@ -1000,6 +1018,8 @@ worker_heartbeat_age_seconds
 | 2026-08-15 | `590a4fcee703` | 建立架构基线、技术债、M0-M6路线和进度规则 | M0完成，总体4/168点 | Ruff通过；38项测试通过 |
 | 2026-08-15 | `590a4fcee703`（工作区） | 统一Python 3.12+版本口径并增加跨入口契约测试 | M1-08与TD-016完成；M1为1/22点；总体5/168点 | Ruff通过；42项测试通过；总覆盖率64%；pip check与PowerShell语法检查通过 |
 | 2026-08-15 | `590a4fcee703`（工作区） | 增加阶段级Goal治理、M1-A至M1-C分组和可复用推进提示词 | 路线点数不变；Goal默认停止单元由单工作包调整为工程阶段 | 文档结构、阶段点数、依赖、相对链接和工作区diff复核通过 |
+| 2026-08-15 | `d41577776d8c`（工作区） | 完成M1-A：调度/选择Policy、Research/Ops启动校验、正式迁移Runner | M1-05/06/07、TD-003/004完成；M1为9/22点；总体13/168点；下一阶段M1-B | Ruff通过；60项测试通过；总覆盖率66%；迁移五类场景、阶段贯穿场景、pip check与PowerShell语法通过 |
+| 2026-08-15 | `d41577776d8c`（工作区） | 完成M1-B：Run状态机与Research Run原子发布UoW | M1-01/02、TD-001完成；M1为17/22点；总体21/168点；下一阶段M1-C | Ruff通过；83项测试通过；总覆盖率71%；UoW 100%；四阶段故障回滚、重试、迁移兼容与pip check通过 |
 
 ---
 

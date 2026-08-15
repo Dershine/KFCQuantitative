@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 
 from kfcquant.config import Settings
 from kfcquant.models import CandidateScore, FactorBreakdown
+from kfcquant.policies import SchedulePolicy
 
 SH_MAIN_PREFIXES = ("600", "601", "603", "605")
 SZ_MAIN_PREFIXES = ("000", "001", "002", "003")
@@ -22,12 +23,13 @@ def is_shenzhen_shanghai_main_board(ts_code: str) -> bool:
     return False
 
 
-def trading_minutes_elapsed(at: datetime) -> int:
+def trading_minutes_elapsed(at: datetime, schedule: SchedulePolicy | None = None) -> int:
+    schedule = schedule or SchedulePolicy()
     local = at.timetz().replace(tzinfo=None)
-    morning_start = time(9, 30)
-    morning_end = time(11, 30)
-    afternoon_start = time(13)
-    afternoon_end = time(15)
+    morning_start = schedule.market_morning_open
+    morning_end = schedule.market_morning_close
+    afternoon_start = schedule.market_afternoon_open
+    afternoon_end = schedule.market_close
     if local <= morning_start:
         return 0
     if local <= morning_end:
@@ -90,7 +92,7 @@ class ScoringService:
         quote_latest["quote_age_seconds"] = (as_of_utc - quote_latest["captured_at"]).dt.total_seconds().abs()
 
         rows: list[dict[str, float | str | datetime]] = []
-        minutes_elapsed = max(trading_minutes_elapsed(as_of), 1)
+        minutes_elapsed = max(trading_minutes_elapsed(as_of, self.settings.schedule), 1)
         session_fraction = min(minutes_elapsed / 240.0, 1.0)
         security_names = securities.set_index("ts_code")["name"].to_dict()
         quote_map = quote_latest.set_index("ts_code").to_dict("index")
@@ -262,7 +264,11 @@ class ScoringService:
                     quote_at=row["quote_at"],
                 )
             )
-        return ScoringResult(candidates=candidates[:100], eligible_count=len(frame), exclusion_counts=exclusions)
+        return ScoringResult(
+            candidates=candidates[: self.settings.selection.candidate_limit],
+            eligible_count=len(frame),
+            exclusion_counts=exclusions,
+        )
 
     def score_morning(
         self,
@@ -304,7 +310,9 @@ class ScoringService:
                     "ts_code": str(code),
                     "name": str(names[code]),
                     "quote_at": datetime.combine(
-                        pd.Timestamp(latest["trade_date"]).date(), time(15), tzinfo=as_of.tzinfo
+                        pd.Timestamp(latest["trade_date"]).date(),
+                        self.settings.schedule.market_close,
+                        tzinfo=as_of.tzinfo,
                     ),
                     "ret_1d": float(closes[-1] / closes[-2] - 1.0),
                     "ret_5d": float(closes[-1] / closes[-6] - 1.0),
@@ -383,4 +391,6 @@ class ScoringService:
                     quote_at=row["quote_at"],
                 )
             )
-        return ScoringResult(candidates[:100], len(frame), {"eligible": len(frame)})
+        return ScoringResult(
+            candidates[: self.settings.selection.candidate_limit], len(frame), {"eligible": len(frame)}
+        )

@@ -50,8 +50,8 @@ tabs = st.tabs(["今日候选", "候选详情", "影子组合", "交易记录", 
 
 with tabs[0]:
     for title, kind in (
-        ("08:30 盘前观察名单", SignalKind.MORNING_WATCHLIST.value),
-        ("14:40 尾盘入场候选", SignalKind.PRECLOSE_ENTRY.value),
+        (f"{settings.schedule.morning_run_at:%H:%M} 盘前观察名单", SignalKind.MORNING_WATCHLIST.value),
+        (f"{settings.schedule.preclose_run_at:%H:%M} 尾盘入场候选", SignalKind.PRECLOSE_ENTRY.value),
     ):
         st.subheader(title)
         run = safe_read(
@@ -84,7 +84,7 @@ with tabs[0]:
         if candidates.empty:
             st.info("没有满足条件的候选。")
         else:
-            top = candidates.head(10).copy()
+            top = candidates.head(settings.selection.top_n).copy()
             top["风险状态"] = top["blocked"].map({True: "已排除", False: "通过"})
             st.dataframe(
                 top[["rank", "ts_code", "name", "opportunity_score", "风险状态", "quote_at"]],
@@ -92,7 +92,11 @@ with tabs[0]:
                 hide_index=True,
             )
             chart = px.bar(
-                top, x="ts_code", y="opportunity_score", color="风险状态", title="前10名机会评分（非上涨概率）"
+                top,
+                x="ts_code",
+                y="opportunity_score",
+                color="风险状态",
+                title=f"前{settings.selection.top_n}名机会评分（非上涨概率）",
             )
             st.plotly_chart(chart, width="stretch")
 
@@ -100,7 +104,11 @@ with tabs[1]:
     selected_kind = st.radio(
         "信号类型",
         [SignalKind.MORNING_WATCHLIST.value, SignalKind.PRECLOSE_ENTRY.value],
-        format_func=lambda value: "08:30盘前观察" if value == SignalKind.MORNING_WATCHLIST.value else "14:40尾盘入场",
+        format_func=lambda value: (
+            f"{settings.schedule.morning_run_at:%H:%M}盘前观察"
+            if value == SignalKind.MORNING_WATCHLIST.value
+            else f"{settings.schedule.preclose_run_at:%H:%M}尾盘入场"
+        ),
         horizontal=True,
     )
     run = safe_read(lambda: database.latest_signal_run(signal_kind=selected_kind), None)
@@ -115,7 +123,7 @@ with tabs[1]:
         else:
             options = {
                 f"#{int(row['rank'])} {row['ts_code']} {row['name']}": row
-                for row in candidates.head(100).to_dict("records")
+                for row in candidates.head(settings.selection.candidate_limit).to_dict("records")
             }
             selected = st.selectbox("选择股票", list(options))
             row = options[selected]
@@ -178,8 +186,8 @@ with tabs[4]:
     )
     outcome_cols = st.columns(2)
     for column, title, frame in (
-        (outcome_cols[0], "08:30 当日命中", morning_outcomes),
-        (outcome_cols[1], "14:40 次日命中", preclose_outcomes),
+        (outcome_cols[0], f"{settings.schedule.morning_run_at:%H:%M} 当日命中", morning_outcomes),
+        (outcome_cols[1], f"{settings.schedule.preclose_run_at:%H:%M} 次日命中", preclose_outcomes),
     ):
         with column:
             evaluable = frame[frame["status"].isin(["hit", "miss"])] if not frame.empty else frame
@@ -205,7 +213,7 @@ with tabs[4]:
 
 with tabs[5]:
     jobs = safe_table("job_runs", 200)
-    runs = safe_table("signal_runs", 100)
+    runs = safe_read(lambda: database.recent_signal_runs(100), pd.DataFrame())
     documents = safe_table("news_documents", 200)
     if not jobs.empty:
         st.subheader("任务运行")
@@ -221,7 +229,7 @@ with tabs[5]:
 with tabs[6]:
     reports = safe_table("reports", 60)
     if reports.empty:
-        st.info("尚未生成20:30收盘报告。")
+        st.info(f"尚未生成{settings.schedule.postclose_at:%H:%M}收盘报告。")
     else:
         report = reports.sort_values("generated_at", ascending=False).iloc[0]
         st.caption(f"生成时间：{report['generated_at']}｜模型：{report['model_name']}")

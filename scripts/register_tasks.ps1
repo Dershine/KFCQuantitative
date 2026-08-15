@@ -1,8 +1,20 @@
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Runner = Join-Path $PSScriptRoot "run_task.ps1"
+$PythonExe = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $TaskPath = "\KFCQuant\"
+Set-Location -LiteralPath $ProjectRoot
+
+if (-not (Test-Path -LiteralPath $PythonExe)) {
+    throw "Virtual environment not found: $PythonExe"
+}
+
+$ScheduleJson = & $PythonExe -m kfcquant.cli schedule-plan --json | Out-String
+if ($LASTEXITCODE -ne 0) {
+    throw "KFCQuant schedule configuration is invalid"
+}
+$Schedule = $ScheduleJson | ConvertFrom-Json
 
 function Register-KFCQuantTask {
     param(
@@ -24,14 +36,20 @@ function Register-KFCQuantTask {
     Register-ScheduledTask -TaskName $Name -TaskPath $TaskPath -Action $Action -Trigger $Trigger -Settings $Settings -Description "KFCQuant research-only scheduled task" -Force | Out-Null
 }
 
-Register-KFCQuantTask -Name "SyncCalendar" -Command "sync-calendar" -At "08:00"
-Register-KFCQuantTask -Name "Morning" -Command "run-morning" -At "08:30"
-Register-KFCQuantTask -Name "EvaluateMorning" -Command "evaluate-morning" -At "14:35"
-Register-KFCQuantTask -Name "Preclose" -Command "run-preclose" -At "14:40"
-Register-KFCQuantTask -Name "CaptureFill" -Command "capture-fill" -At "14:45"
-# BaoStock's free daily data is published later than commercial EOD feeds.
-Register-KFCQuantTask -Name "SyncEod" -Command "sync-eod" -At "18:10"
-Register-KFCQuantTask -Name "Postclose" -Command "run-postclose" -At "20:30"
-Register-KFCQuantTask -Name "Monitor" -Command "monitor-paper" -At "09:30" -RepeatInterval (New-TimeSpan -Minutes 5) -RepeatDuration (New-TimeSpan -Hours 5 -Minutes 30)
+foreach ($Task in $Schedule.tasks) {
+    $At = [datetime]::ParseExact([string]$Task.at, "HH:mm", [Globalization.CultureInfo]::InvariantCulture)
+    Register-KFCQuantTask -Name ([string]$Task.name) -Command ([string]$Task.command) -At $At
+}
+
+$MonitorAt = [datetime]::ParseExact(
+    [string]$Schedule.monitor.start,
+    "HH:mm",
+    [Globalization.CultureInfo]::InvariantCulture
+)
+Register-KFCQuantTask -Name ([string]$Schedule.monitor.name) `
+    -Command ([string]$Schedule.monitor.command) `
+    -At $MonitorAt `
+    -RepeatInterval (New-TimeSpan -Minutes ([int]$Schedule.monitor.interval_minutes)) `
+    -RepeatDuration (New-TimeSpan -Minutes ([int]$Schedule.monitor.duration_minutes))
 
 Write-Host "KFCQuant tasks registered under $TaskPath. Jobs safely no-op outside trading sessions."
