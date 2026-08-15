@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import shutil
 import ssl
@@ -14,15 +16,18 @@ from zoneinfo import ZoneInfo
 import duckdb
 import httpx
 from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
 
 from kfcops.config import OpsSettings
 from kfcops.store import OpsStore
 
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
-TERMINAL_STATES = {"succeeded", "rolled_back", "manual_intervention_required"}
+TERMINAL_STATES = {"succeeded", "rolled_back", "failed", "manual_intervention_required"}
 
 
 class DeploymentManager:
+    """Deploy tested Git commits into a native virtualenv managed by systemd."""
+
     def __init__(self, settings: OpsSettings, store: OpsStore):
         self.settings = settings
         self.store = store
@@ -44,7 +49,9 @@ class DeploymentManager:
             )
             runs.raise_for_status()
         successful = {
-            item["head_sha"] for item in runs.json().get("workflow_runs", []) if item.get("conclusion") == "success"
+            item["head_sha"]
+            for item in runs.json().get("workflow_runs", [])
+            if item.get("name") == "test-and-release" and item.get("conclusion") == "success"
         }
         return [
             {
@@ -61,16 +68,31 @@ class DeploymentManager:
         self._validate_sha(sha)
         if self._busy():
             raise RuntimeError("已有部署正在执行")
-        current = self.store.get("active_sha")
+        current = self._active_sha()
         if self._protected_window():
             deployment_id = self.store.create_deployment(sha, current, "pending", "交易窗口内，仅记录待处理请求")
             self.store.set("pending_sha", sha)
             self.store.audit("deploy", sha, "pending", "protected trading window")
             return "pending", deployment_id
         deployment_id = self.store.create_deployment(sha, current, "checking", "开始检查发布版本")
-        thread = threading.Thread(target=self._deploy, args=(deployment_id, sha, current), daemon=True)
-        thread.start()
+        threading.Thread(target=self._deploy, args=(deployment_id, sha, current), daemon=True).start()
         return "checking", deployment_id
+
+    def deploy_now(self, sha: str) -> int:
+        """Run a deployment synchronously for the root-operated deployment script."""
+        self._validate_sha(sha)
+        if self._protected_window():
+            raise RuntimeError("交易保护窗口内禁止部署")
+        if self._busy():
+            raise RuntimeError("已有部署正在执行")
+        current = self._active_sha()
+        deployment_id = self.store.create_deployment(sha, current, "checking", "开始检查发布版本")
+        self._deploy(deployment_id, sha, current)
+        deployment = self.store.deployment(deployment_id)
+        status = str(deployment["status"]) if deployment else "missing"
+        if status != "succeeded":
+            raise RuntimeError(f"部署未成功，最终状态: {status}")
+        return deployment_id
 
     def request_rollback(self) -> int:
         previous = self.store.get("previous_sha")
@@ -80,17 +102,18 @@ class DeploymentManager:
             raise RuntimeError("交易窗口内禁止回滚")
         if self._busy():
             raise RuntimeError("已有部署正在执行")
-        deployment_id = self.store.create_deployment(previous, self.store.get("active_sha"), "rolling_back", "手动回滚")
+        deployment_id = self.store.create_deployment(previous, self._active_sha(), "rolling_back", "手动回滚")
         backup_value = self.store.get("previous_backup")
         backup = Path(backup_value) if backup_value else None
-        threading.Thread(target=self._rollback, args=(deployment_id, previous, backup), daemon=True).start()
+        threading.Thread(target=self._rollback_exclusive, args=(deployment_id, previous, backup), daemon=True).start()
         return deployment_id
 
     def restart(self) -> None:
         if self._protected_window() or self._busy():
             raise RuntimeError("当前禁止重启")
-        self._run_compose("restart", "research-web", "research-worker")
-        self.store.audit("restart", self.store.get("active_sha"), "success", "research services restarted")
+        self._run_service("restart")
+        self._wait_healthy()
+        self.store.audit("restart", self._active_sha(), "success", "research services restarted")
 
     def cancel_pending(self) -> None:
         sha = self.store.get("pending_sha")
@@ -98,10 +121,13 @@ class DeploymentManager:
         self.store.audit("cancel-pending", sha, "success", "pending deployment cleared")
 
     def runtime(self) -> dict[str, object]:
-        try:
-            output = self._run_compose("ps", "--format", "json", check=False)
-        except Exception as exc:
-            output = str(exc)
+        states = []
+        for service in ("worker", "web"):
+            try:
+                state = self._run_service("is-active", service, check=False).strip()
+            except Exception as exc:
+                state = str(exc)
+            states.append(f"kfcquant-{service}: {state}")
         disk = shutil.disk_usage(self.settings.research_database.parent)
         certificate: dict[str, object] = {"configured": False}
         if self.settings.certificate_path and self.settings.certificate_path.exists():
@@ -111,24 +137,30 @@ class DeploymentManager:
             except Exception as exc:
                 certificate = {"configured": True, "error": str(exc)}
         return {
-            "active_sha": self.store.get("active_sha"),
+            "active_sha": self._active_sha(),
             "previous_sha": self.store.get("previous_sha"),
             "pending_sha": self.store.get("pending_sha"),
-            "compose_ps": output[-8000:],
+            "service_status": "\n".join(states),
             "disk_free_bytes": disk.free,
             "certificate": certificate,
         }
 
     def logs(self) -> str:
         try:
-            return self._redact(
-                self._run_compose("logs", "--tail", "200", "research-web", "research-worker", check=False)
-            )
+            return self._redact(self._run_service("logs", check=False))
         except Exception as exc:
             return f"日志暂不可用: {exc}"
 
     def _deploy(self, deployment_id: int, sha: str, previous: str) -> None:
         if not self._mutex.acquire(blocking=False):
+            self._stage(deployment_id, "failed", "另一个部署线程已在执行")
+            return
+        deployment_lock = FileLock(self.settings.deployment_lock)
+        try:
+            deployment_lock.acquire(timeout=0)
+        except FileLockTimeout:
+            self._stage(deployment_id, "failed", "另一个部署进程已在执行")
+            self._mutex.release()
             return
         backup: Path | None = None
         try:
@@ -139,16 +171,19 @@ class DeploymentManager:
             self._stage(deployment_id, "prechecking", "检查任务和磁盘")
             if self._research_job_running():
                 raise RuntimeError("研究任务正在运行")
-            self._stage(deployment_id, "pulling", "拉取不可变镜像")
-            self._write_release(sha)
-            self._run_compose("pull", "research-web", "research-worker")
+            self._stage(deployment_id, "fetching", "从Git远端拉取目标提交")
+            self._run_git("fetch", "--prune", "origin", "main")
+            self._run_git("cat-file", "-e", f"{sha}^{{commit}}")
             self._stage(deployment_id, "backing_up", "停止服务并备份数据库")
-            self._run_compose("stop", "research-web", "research-worker")
+            self._run_service("stop")
             backup = self._backup_database(sha)
+            self._stage(deployment_id, "installing", "检出源码并安装锁定依赖")
+            self._checkout_and_install(sha)
+            self._write_release(sha)
             self._stage(deployment_id, "migrating", "执行数据库迁移")
-            self._run_compose("run", "--rm", "research-worker", "kfcquant", "migrate")
+            self._run_application("migrate")
             self._stage(deployment_id, "starting", "启动新版本")
-            self._run_compose("up", "-d", "--remove-orphans")
+            self._run_service("start")
             self._stage(deployment_id, "healthchecking", "等待网页和worker健康")
             self._wait_healthy()
             self.store.set("previous_sha", previous)
@@ -158,32 +193,64 @@ class DeploymentManager:
             self._stage(deployment_id, "succeeded", "部署成功")
             self.store.audit("deploy", sha, "success", f"previous={previous}")
             self._prune_backups()
+            self._run_service("restart-ops", check=False)
         except Exception as exc:
             self._stage(deployment_id, "failed", str(exc))
             if previous:
                 self._stage(deployment_id, "rolling_back", "自动恢复上一版本")
                 self._rollback(deployment_id, previous, backup)
             else:
+                self._run_service("start", check=False)
                 self._stage(deployment_id, "manual_intervention_required", "没有上一版本可自动回滚")
         finally:
+            deployment_lock.release()
             self._mutex.release()
 
     def _rollback(self, deployment_id: int, sha: str, backup: Path | None) -> None:
         try:
-            self._run_compose("stop", "research-web", "research-worker")
+            self._run_service("stop", check=False)
             if backup and backup.exists():
                 shutil.copy2(backup, self.settings.research_database)
+            self._checkout_and_install(sha)
             self._write_release(sha)
-            self._run_compose("up", "-d", "--remove-orphans")
+            self._run_application("migrate")
+            self._run_service("start")
             self._wait_healthy()
-            current = self.store.get("active_sha")
             self.store.set("active_sha", sha)
-            self.store.set("previous_sha", current if current != sha else "")
+            self.store.set("previous_sha", "")
+            self.store.set("previous_backup", "")
             self._stage(deployment_id, "rolled_back", f"已恢复版本 {sha[:12]}")
             self.store.audit("rollback", sha, "success", "service healthy")
+            self._run_service("restart-ops", check=False)
         except Exception as exc:
             self._stage(deployment_id, "manual_intervention_required", f"回滚失败: {exc}")
             self.store.audit("rollback", sha, "failed", str(exc))
+
+    def _rollback_exclusive(self, deployment_id: int, sha: str, backup: Path | None) -> None:
+        if not self._mutex.acquire(blocking=False):
+            self._stage(deployment_id, "failed", "另一个部署线程已在执行")
+            return
+        deployment_lock = FileLock(self.settings.deployment_lock)
+        try:
+            deployment_lock.acquire(timeout=0)
+        except FileLockTimeout:
+            self._stage(deployment_id, "failed", "另一个部署进程已在执行")
+            self._mutex.release()
+            return
+        try:
+            self._rollback(deployment_id, sha, backup)
+        finally:
+            deployment_lock.release()
+            self._mutex.release()
+
+    def _active_sha(self) -> str:
+        recorded = self.store.get("active_sha")
+        if recorded:
+            return recorded
+        try:
+            return self._run_git("rev-parse", "HEAD").strip()
+        except Exception:
+            return ""
 
     def _validate_sha(self, sha: str) -> None:
         if not SHA_PATTERN.fullmatch(sha):
@@ -221,10 +288,34 @@ class DeploymentManager:
         recent = self.store.recent_deployments(1)
         return bool(recent and recent[0]["status"] not in TERMINAL_STATES | {"pending"})
 
+    def _checkout_and_install(self, sha: str) -> None:
+        self._run_git("checkout", "--detach", sha)
+        lock_file = self.settings.repository_directory / "requirements.lock"
+        if not lock_file.exists():
+            raise RuntimeError("目标版本缺少 requirements.lock")
+        python = self._python_executable()
+        self._run_command([str(python), "-m", "pip", "install", "--requirement", str(lock_file)], timeout=1800)
+        self._run_command(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--no-build-isolation",
+                "--no-deps",
+                str(self.settings.repository_directory),
+            ],
+            timeout=900,
+        )
+
     def _write_release(self, sha: str) -> None:
+        build_time = self._run_git("show", "-s", "--format=%cI", sha).strip()
         self.settings.release_env_file.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.settings.release_env_file.with_suffix(".tmp")
-        temporary.write_text(f"KFCQUANT_IMAGE_TAG=sha-{sha}\n", encoding="utf-8")
+        temporary.write_text(
+            f"KFCQUANT_SOURCE_SHA={sha}\nKFCQUANT_BUILD_TIME={build_time}\n",
+            encoding="utf-8",
+        )
         temporary.replace(self.settings.release_env_file)
 
     def _backup_database(self, sha: str) -> Path | None:
@@ -250,31 +341,48 @@ class DeploymentManager:
         for _ in range(24):
             try:
                 response = httpx.get(self.settings.research_health_url, timeout=5)
-                worker = self._run_compose("exec", "-T", "research-worker", "kfcquant", "health", "--json", check=False)
-                if response.status_code == 200 and '"status": "ok"' in worker:
+                worker_active = self._run_service("is-active", "worker", check=False).strip() == "active"
+                health_output = self._run_application("health", "--json", check=False)
+                health = json.loads(health_output)
+                if response.status_code == 200 and worker_active and health.get("status") == "ok":
                     return
-                last_error = f"web={response.status_code}; worker={worker[-500:]}"
+                last_error = f"web={response.status_code}; worker={worker_active}; health={health_output[-500:]}"
             except Exception as exc:
                 last_error = str(exc)
             time.sleep(5)
         raise RuntimeError(f"健康检查超时: {last_error}")
 
-    def _run_compose(self, *arguments: str, check: bool = True) -> str:
-        command = [
-            "docker",
-            "compose",
-            "--env-file",
-            str(self.settings.release_env_file),
-            "-f",
-            str(self.settings.compose_file),
-            *arguments,
-        ]
+    def _python_executable(self) -> Path:
+        executable = "Scripts/python.exe" if os.name == "nt" else "bin/python"
+        path = self.settings.virtualenv_directory / executable
+        if not path.exists():
+            raise RuntimeError(f"生产虚拟环境不存在: {path}")
+        return path
+
+    def _run_git(self, *arguments: str, check: bool = True) -> str:
+        return self._run_command(
+            ["git", "-C", str(self.settings.repository_directory), *arguments],
+            check=check,
+            timeout=900,
+        )
+
+    def _run_application(self, *arguments: str, check: bool = True) -> str:
+        if os.name == "nt":
+            executable = self.settings.virtualenv_directory / "Scripts/kfcquant.exe"
+            return self._run_command([str(executable), *arguments], check=check, timeout=900)
+        return self._run_service("app", *arguments, check=check)
+
+    def _run_service(self, *arguments: str, check: bool = True) -> str:
+        command = ["sudo", "-n", str(self.settings.service_control_command), *arguments]
+        return self._run_command(command, check=check, timeout=120)
+
+    def _run_command(self, command: list[str], *, check: bool = True, timeout: int = 900) -> str:
         result = subprocess.run(
             command,
-            cwd=self.settings.compose_directory,
+            cwd=self.settings.repository_directory,
             capture_output=True,
             text=True,
-            timeout=900,
+            timeout=timeout,
             check=False,
         )
         output = self._redact(f"{result.stdout}\n{result.stderr}")

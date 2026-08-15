@@ -1,5 +1,6 @@
 .env
 .ops.env
+.release.env
 .venv/
 __pycache__/
 *.py[cod]

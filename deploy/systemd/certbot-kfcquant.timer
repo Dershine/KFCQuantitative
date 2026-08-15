@@ -1,5 +1,5 @@
 [Unit]
-Description=Renew KFCQuant IP certificate frequently
+Description=Renew KFCQuant TLS certificate periodically
 
 [Timer]
 OnCalendar=*-*-* 00,06,12,18:17:00

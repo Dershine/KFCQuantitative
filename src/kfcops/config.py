@@ -9,9 +9,11 @@ class OpsSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".ops.env", env_prefix="KFCOPS_", extra="ignore")
 
     database_path: Path = Path("/var/lib/kfcops/ops.sqlite3")
-    compose_directory: Path = Path("/opt/kfcquant/research")
-    compose_file: Path = Path("/opt/kfcquant/research/compose.yaml")
-    release_env_file: Path = Path("/opt/kfcquant/research/.release.env")
+    deployment_lock: Path = Path("/var/lib/kfcops/deploy.lock")
+    repository_directory: Path = Path("/opt/kfcquant/app")
+    virtualenv_directory: Path = Path("/opt/kfcquant/app/.venv")
+    release_env_file: Path = Path("/opt/kfcquant/app/.release.env")
+    service_control_command: Path = Path("/usr/local/sbin/kfcquant-service-control")
     research_database: Path = Path("/var/lib/kfcquant/data/kfcquant.duckdb")
     research_lock: Path = Path("/var/lib/kfcquant/runtime/database.lock")
     certificate_path: Path | None = None

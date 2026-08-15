@@ -1,27 +1,27 @@
 [Unit]
-Description=KFCQuant Operations Manager
+Description=KFCQuant Research Scheduler and Database Writer
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=kfcops
+User=kfcquant
 Group=kfcquant
 WorkingDirectory=/opt/kfcquant/app
 EnvironmentFile=/etc/kfcquant/research.env
-EnvironmentFile=/etc/kfcquant/ops.env
 EnvironmentFile=-/opt/kfcquant/app/.release.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
-Environment=HOME=/var/lib/kfcops
-ExecStart=/opt/kfcquant/app/.venv/bin/kfcops serve --host 127.0.0.1 --port 8600
+Environment=HOME=/var/lib/kfcquant
+ExecStart=/opt/kfcquant/app/.venv/bin/kfcquant scheduler
 Restart=always
-RestartSec=5
+RestartSec=10
 UMask=0007
+NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/kfcops /var/lib/kfcquant /opt/kfcquant/app
+ReadWritePaths=/var/lib/kfcquant
 
 [Install]
 WantedBy=multi-user.target

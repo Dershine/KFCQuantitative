@@ -126,7 +126,10 @@ def run_postclose() -> None:
 
 
 @app.command()
-def serve() -> None:
+def serve(
+    host: str = typer.Option("127.0.0.1", help="监听地址；生产环境建议仅监听本机"),
+    port: int = typer.Option(8501, help="监听端口"),
+) -> None:
     dashboard = Path(__file__).with_name("dashboard.py")
     settings = get_settings()
     arguments = [
@@ -135,7 +138,10 @@ def serve() -> None:
         "streamlit",
         "run",
         str(dashboard),
-        "--server.address=0.0.0.0",
+        f"--server.address={host}",
+        f"--server.port={port}",
+        "--server.headless=true",
+        "--browser.gatherUsageStats=false",
     ]
     base_path = getattr(settings, "base_url_path", "")
     if base_path:

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+  start|stop|restart)
+    [[ $# -eq 1 ]] || exit 64
+    exec /usr/bin/systemctl "$1" kfcquant-worker.service kfcquant-web.service
+    ;;
+  is-active)
+    [[ $# -eq 2 ]] || exit 64
+    case "$2" in
+      worker|web) exec /usr/bin/systemctl is-active "kfcquant-$2.service" ;;
+      *) exit 64 ;;
+    esac
+    ;;
+  logs)
+    [[ $# -eq 1 ]] || exit 64
+    exec /usr/bin/journalctl --no-pager -n 200 -u kfcquant-worker.service -u kfcquant-web.service
+    ;;
+  restart-ops)
+    [[ $# -eq 1 ]] || exit 64
+    exec /usr/bin/systemctl --no-block restart kfcops.service
+    ;;
+  app)
+    shift
+    case "$*" in
+      migrate|"health --json") ;;
+      *) exit 64 ;;
+    esac
+    set -a
+    # shellcheck disable=SC1091
+    source /etc/kfcquant/research.env
+    if [[ -f /opt/kfcquant/app/.release.env ]]; then
+      # shellcheck disable=SC1091
+      source /opt/kfcquant/app/.release.env
+    fi
+    set +a
+    exec /usr/sbin/runuser -u kfcquant --preserve-environment -- /opt/kfcquant/app/.venv/bin/kfcquant "$@"
+    ;;
+  *)
+    echo "usage: kfcquant-service-control {start|stop|restart|restart-ops|is-active SERVICE|logs|app COMMAND}" >&2
+    exit 64
+    ;;
+esac

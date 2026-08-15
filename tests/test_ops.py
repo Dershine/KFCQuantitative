@@ -14,8 +14,9 @@ from kfcops.web import create_app
 def ops_settings(tmp_path):
     return OpsSettings(
         database_path=tmp_path / "ops.sqlite3",
-        compose_directory=tmp_path,
-        compose_file=tmp_path / "compose.yaml",
+        deployment_lock=tmp_path / "deploy.lock",
+        repository_directory=tmp_path,
+        virtualenv_directory=tmp_path / ".venv",
         release_env_file=tmp_path / ".release.env",
         research_database=tmp_path / "research.duckdb",
         backup_directory=tmp_path / "backups",
@@ -42,7 +43,7 @@ def test_ops_write_requires_csrf_and_confirmation(tmp_path, monkeypatch):
             "active_sha": "",
             "previous_sha": "",
             "pending_sha": "",
-            "compose_ps": "",
+            "service_status": "",
             "disk_free_bytes": 10_737_418_240,
             "certificate": {},
         },
@@ -85,7 +86,10 @@ def test_successful_deployment_records_rollback_material(tmp_path, monkeypatch):
     deployment_id = store.create_deployment(target, "b" * 40, "checking", "test")
     monkeypatch.setattr(manager, "releases", lambda: [{"sha": target, "deployable": True}])
     monkeypatch.setattr(manager, "_research_job_running", lambda: False)
-    monkeypatch.setattr(manager, "_run_compose", lambda *args, **kwargs: "ok")
+    monkeypatch.setattr(manager, "_run_git", lambda *args, **kwargs: "2026-08-15T00:00:00+08:00")
+    monkeypatch.setattr(manager, "_run_service", lambda *args, **kwargs: "ok")
+    monkeypatch.setattr(manager, "_run_application", lambda *args, **kwargs: "ok")
+    monkeypatch.setattr(manager, "_checkout_and_install", lambda *args, **kwargs: None)
     monkeypatch.setattr(manager, "_wait_healthy", lambda: None)
 
     manager._deploy(deployment_id, target, "b" * 40)

@@ -67,7 +67,7 @@ class OpsStore:
     def update_deployment(self, deployment_id: int, status: str, message: str, log: str = "") -> None:
         finished = (
             datetime.now(UTC).isoformat()
-            if status in {"succeeded", "rolled_back", "manual_intervention_required"}
+            if status in {"succeeded", "rolled_back", "failed", "manual_intervention_required"}
             else None
         )
         with self.connect() as connection:
@@ -89,6 +89,11 @@ class OpsStore:
         with self.connect() as connection:
             rows = connection.execute("SELECT * FROM deployments ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
+
+    def deployment(self, deployment_id: int) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone()
+        return dict(row) if row else None
 
     def recent_audit(self, limit: int = 100) -> list[dict[str, object]]:
         with self.connect() as connection:

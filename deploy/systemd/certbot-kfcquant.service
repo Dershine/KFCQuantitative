@@ -1,5 +1,5 @@
 [Unit]
-Description=Renew KFCQuant short-lived IP certificate
+Description=Renew KFCQuant TLS certificate
 
 [Service]
 Type=oneshot

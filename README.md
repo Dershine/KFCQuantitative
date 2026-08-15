@@ -177,51 +177,82 @@ KFCQUANT_NEWS_PROVIDER=tushare
 
 免费数据适合学习和前向影子验证，不适合据此宣称策略已经具备稳定收益。至少连续运行60个交易日后，再评估是否购买专业数据。
 
-## Linux服务器部署
+## Linux服务器原生部署
 
-服务器形态为Docker Compose研究栈加宿主机`kfcops`管理服务：
+生产服务器不要求Docker。标准形态为Git工作区、Python虚拟环境、三个systemd服务和Nginx：
 
-- 研究网页：`https://<服务器IP>/research/`
-- 运行管理器：`https://<服务器IP>/ops/`
-- 两个入口由Nginx统一提供HTTPS和Basic Auth；
-- `research-worker`是DuckDB唯一写入者，网页与管理器通过同一跨进程锁只读；
-- 管理器只接受通过`main`工作流验证的40位Git SHA，不接受任意镜像或Shell命令。
+- 研究网页：`https://<服务器IP或域名>/research/`；
+- 运行管理器：`https://<服务器IP或域名>/ops/`；
+- `kfcquant-worker`是DuckDB唯一写入者；
+- `kfcquant-web`以只读模式访问数据库，并且只监听`127.0.0.1:8501`；
+- `kfcops`只接受通过`main`工作流验证的40位Git SHA；
+- 数据、报告和备份存放在`/var/lib/kfcquant/`，不会被Git更新覆盖。
 
-### 发布流程
-
-每次推送`main`后，GitHub Actions会执行Ruff、Pytest并构建：
-
-```text
-ghcr.io/dershine/kfcquantitative:sha-<完整commit SHA>
-```
-
-首次使用前，在GitHub中把仓库和GHCR包设为私有。服务器使用只读包令牌登录GHCR，运行管理器使用只读仓库令牌查询提交和Actions状态。
+服务器需要Python 3.12或更高版本。生产依赖固定在`requirements.lock`；GitHub Actions会在Python 3.12上安装锁定依赖、执行Ruff和Pytest，并保存wheel构建产物。
 
 ### 首次初始化服务器
 
-在Ubuntu 24.04/Debian x86_64服务器克隆私有仓库后执行：
+在Ubuntu 24.04服务器克隆私有仓库后执行：
 
 ```bash
 sudo bash deploy/bootstrap_server.sh
 ```
 
-脚本安装Docker、Nginx、运行管理器和Let’s Encrypt短期IP证书。随后：
+初始化脚本会：
 
-1. 填写`/opt/kfcquant/research/.env`中的DeepSeek密钥；
-2. 填写`/etc/kfcquant/ops.env`中的`KFCOPS_GITHUB_TOKEN`；
-3. 使用只读GHCR令牌执行`docker login ghcr.io`；
-4. 从`/ops/`部署第一个测试成功的SHA；
-5. 在容器中同步约400天历史数据并运行`doctor --online`。
+1. 安装Git、Python、Nginx、Basic Auth和证书工具；
+2. 将现有Git仓库安装到`/opt/kfcquant/app`；
+3. 创建生产虚拟环境并安装`requirements.lock`；
+4. 创建`kfcquant-worker`、`kfcquant-web`和`kfcops`服务；
+5. 配置HTTPS、证书续期和受限的服务控制命令。
 
-完整服务定义见`compose.yaml`，Nginx、systemd和证书续期文件位于`deploy/`。交易日08:15–15:10提交的部署只会登记为待处理，不会自动在盘后执行。
+随后填写并保护两个配置文件：
+
+```text
+/etc/kfcquant/research.env  # DeepSeek密钥、供应商和持久化路径
+/etc/kfcquant/ops.env       # GitHub只读令牌和运行管理器配置
+```
+
+私有仓库还需要给`kfcops`系统用户配置只读Git deploy key，并把`/opt/kfcquant/app`的`origin`设为对应SSH地址。`KFCOPS_GITHUB_TOKEN`只用于读取提交和Actions状态，不会被写进Git remote。
+
+填写配置后执行：
+
+```bash
+sudo systemctl restart kfcquant-worker kfcquant-web kfcops
+sudo kfcquant-admin doctor --online
+
+end_date=$(date +%F)
+start_date=$(date -d '400 days ago' +%F)
+sudo kfcquant-admin sync-eod --start "$start_date" --end "$end_date"
+```
+
+### 发布更新
+
+不传参数时部署远端`main`的最新提交：
+
+```bash
+sudo bash /opt/kfcquant/app/deploy/deploy_server.sh
+```
+
+也可以部署明确的已测试版本：
+
+```bash
+sudo bash /opt/kfcquant/app/deploy/deploy_server.sh <完整40位commit SHA>
+```
+
+发布管理器依次验证GitHub Actions、检查交易窗口和运行中任务、拉取Git提交、停止研究服务、备份DuckDB、安装锁定依赖、迁移、启动并执行健康检查。失败时自动恢复上一提交和部署前数据库备份，默认保留最近7份备份。
+
+手动回滚会消费当前的回滚点；回滚成功后，下一次正常发布会重新建立新的数据库备份和上一版本记录。
+
+交易日08:15–15:10从网页提交的部署只登记为待处理；命令行部署会直接拒绝。服务器不会执行任意分支名、标签或Shell片段。
 
 ### 运行诊断
 
 ```bash
-kfcquant version --json
-kfcquant health --json
-kfcquant migrate
-kfcquant scheduler
+sudo systemctl status kfcquant-worker kfcquant-web kfcops
+sudo journalctl -u kfcquant-worker -u kfcquant-web -n 200
+sudo kfcquant-admin version --json
+sudo kfcquant-admin health --json
 ```
 
-`health`会报告数据库版本、worker心跳、数据供应商和磁盘余量；`migrate`可重复运行。部署失败时管理器恢复部署前数据库备份和上一镜像，保留最近7份备份。
+`health`会报告数据库版本、worker心跳、数据供应商和磁盘余量；`migrate`可重复运行。
