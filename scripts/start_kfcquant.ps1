@@ -54,11 +54,11 @@ function Get-ProjectFingerprint {
     }
 }
 
-function Find-Python313 {
+function Find-CompatiblePython {
     $candidates = @()
     $pyLauncher = Get-Command "py.exe" -ErrorAction SilentlyContinue
     if ($null -ne $pyLauncher) {
-        $candidates += [pscustomobject]@{ Path = $pyLauncher.Source; Prefix = @("-3.13") }
+        $candidates += [pscustomobject]@{ Path = $pyLauncher.Source; Prefix = @("-3") }
     }
 
     $projectPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
@@ -74,7 +74,7 @@ function Find-Python313 {
     foreach ($candidate in $candidates) {
         $checkArgs = @($candidate.Prefix) + @(
             "-c",
-            "import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)"
+            "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)"
         )
         & $candidate.Path @checkArgs 2>$null
         if ($LASTEXITCODE -eq 0) {
@@ -105,7 +105,7 @@ try {
     $PytestCache = Join-Path $RuntimeRoot "pytest-cache"
     $PythonCache = Join-Path $RuntimeRoot "pycache"
     $CoverageFile = Join-Path $RuntimeRoot ".coverage"
-    $VenvRoot = Join-Path $UserRoot "venv-py313"
+    $VenvRoot = Join-Path $UserRoot "venv-py3"
     $PythonExe = Join-Path $VenvRoot "Scripts\python.exe"
 
     foreach ($directory in @($UserRoot, $RuntimeRoot, $TempRoot, $PytestCache, $PythonCache)) {
@@ -127,10 +127,10 @@ try {
     }
 
     if (-not (Test-Path -LiteralPath $PythonExe)) {
-        Write-Step "Creating a private Python 3.13 environment"
-        $bootstrap = Find-Python313
+        Write-Step "Creating a private Python 3.12+ environment"
+        $bootstrap = Find-CompatiblePython
         if ($null -eq $bootstrap) {
-            throw "Python 3.13 was not found. Install Python 3.13, then run Start-KFCQuant.cmd again."
+            throw "Python 3.12 or newer was not found. Install a supported Python 3 release, then run Start-KFCQuant.cmd again."
         }
         $venvArgs = @($bootstrap.Prefix) + @("-m", "venv", $VenvRoot)
         Invoke-Checked -FilePath $bootstrap.Path -ArgumentList $venvArgs `

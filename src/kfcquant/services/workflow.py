@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import sys
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from sys import version as PYTHON_VERSION
+from sys import version_info as PYTHON_VERSION_INFO
 from typing import Any
 from uuid import uuid4
 
@@ -24,6 +25,8 @@ from kfcquant.services.news import NewsService, NewsSyncResult
 from kfcquant.services.portfolio import PortfolioService
 from kfcquant.services.reports import ReportService
 from kfcquant.services.scoring import ScoringService
+
+MINIMUM_PYTHON_VERSION = (3, 12)
 
 
 class Workflow:
@@ -126,7 +129,13 @@ class Workflow:
 
     def doctor(self, online: bool = False) -> list[dict[str, object]]:
         checks: list[dict[str, object]] = []
-        checks.append({"check": "python", "ok": sys.version_info >= (3, 13), "detail": sys.version.split()[0]})
+        checks.append(
+            {
+                "check": "python",
+                "ok": PYTHON_VERSION_INFO >= MINIMUM_PYTHON_VERSION,
+                "detail": PYTHON_VERSION.split()[0],
+            }
+        )
         checks.append(
             {
                 "check": "database",
