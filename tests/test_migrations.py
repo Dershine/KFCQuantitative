@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import duckdb
 import pytest
 from filelock import Timeout
 
-from kfcquant.db import Database
+from kfcquant.config import SHANGHAI_TZ
+from kfcquant.db import MIGRATIONS, Database
 from kfcquant.migrations import Migration, MigrationRunner
 
 
@@ -25,9 +28,12 @@ def test_empty_database_initialization_and_repeat_are_idempotent(tmp_path):
         ).fetchone()
         signal_columns = {row[1] for row in connection.execute("PRAGMA table_info('signal_runs')").fetchall()}
 
-    assert versions == [1, 2, 3]
+    assert versions == [1, 2, 3, 4]
     assert account == (123_456.0, 123_456.0)
     assert {"signal_kind", "strategy_version", "information_cutoff", "data_as_of", "lifecycle_state"} <= signal_columns
+    with duckdb.connect(str(path), read_only=True) as connection:
+        lease_columns = {row[1] for row in connection.execute("PRAGMA table_info('job_leases')").fetchall()}
+    assert {"job_run_id", "heartbeat_at", "lease_expires_at", "recovery_count"} <= lease_columns
 
 
 def test_existing_signal_schema_is_migrated_in_place(tmp_path):
@@ -51,7 +57,7 @@ def test_existing_signal_schema_is_migrated_in_place(tmp_path):
     database.initialize()
     run = database.latest_signal_run()
 
-    assert database.migration_version() == 3
+    assert database.migration_version() == 4
     assert run["signal_kind"] == "preclose_entry"
     assert run["strategy_version"] == "preclose-v1"
     assert run["information_cutoff"] == run["as_of"]
@@ -107,6 +113,61 @@ def test_additive_lifecycle_migration_remains_writable_by_previous_release(tmp_p
     run = database.latest_signal_run()
     assert run["run_id"] == "old-writer"
     assert run["lifecycle_state"] == "published"
+
+
+def test_job_lease_migration_recovers_legacy_running_job_and_preserves_old_writer(tmp_path):
+    path = tmp_path / "legacy-job.duckdb"
+    started = datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ)
+    with duckdb.connect(str(path)) as connection:
+        connection.execute(
+            """CREATE TABLE job_runs (
+               job_run_id VARCHAR PRIMARY KEY, job_name VARCHAR NOT NULL,
+               scheduled_for TIMESTAMPTZ, started_at TIMESTAMPTZ NOT NULL,
+               finished_at TIMESTAMPTZ, status VARCHAR NOT NULL,
+               message VARCHAR NOT NULL, metadata_json VARCHAR NOT NULL
+               )"""
+        )
+        connection.execute(
+            "INSERT INTO job_runs VALUES ('legacy-running', 'sync-eod', NULL, ?, NULL, 'running', 'started', '{}')",
+            [started],
+        )
+
+    database = Database(path)
+    database.initialize()
+    lease = database.table("job_leases").iloc[0]
+    assert lease["heartbeat_at"].to_pydatetime() == started
+    assert lease["lease_expires_at"].to_pydatetime() == started
+    assert database.recover_expired_jobs(started + timedelta(seconds=1)) == ["legacy-running"]
+
+    # Schema v4 keeps job_runs at eight columns so the previous release remains writable.
+    with duckdb.connect(str(path)) as connection:
+        connection.execute(
+            """INSERT INTO job_runs VALUES (
+               'old-writer', 'sync-calendar', NULL, ?, ?, 'success', 'ok', '{}'
+               )""",
+            [started, started],
+        )
+    assert database.latest_job("sync-calendar")["status"] == "success"
+
+
+def test_failure_after_job_lease_migration_rolls_back_and_resumes(tmp_path):
+    path = tmp_path / "job-lease-migration-failure.duckdb"
+    broken = (
+        *MIGRATIONS,
+        Migration(5, "broken_after_job_leases", ("CREATE TABLE partial (value INTEGER)", "BAD SQL")),
+    )
+    fixed = (*MIGRATIONS, Migration(5, "fixed_after_job_leases", ("CREATE TABLE partial (value INTEGER)",)))
+
+    with duckdb.connect(str(path)) as connection:
+        runner = MigrationRunner(connection)
+        with pytest.raises(duckdb.Error):
+            runner.apply(broken)
+        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 4
+        assert not connection.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name='partial'"
+        ).fetchone()
+        runner.apply(fixed)
+        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 5
 
 
 def test_database_access_uses_shared_cross_process_lock(tmp_path):

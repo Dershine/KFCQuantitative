@@ -10,7 +10,7 @@ from uuid import uuid4
 import pandas as pd
 
 from kfcquant.config import SHANGHAI_TZ, Settings
-from kfcquant.db import Database
+from kfcquant.db import Database, JobLeaseLostError
 from kfcquant.interfaces import LiveQuoteProvider, LLMProvider, MarketDataProvider, NewsProvider
 from kfcquant.models import ResearchRunState, RunStatus, SignalKind, SignalRun
 from kfcquant.providers.document_loader import DocumentLoader
@@ -124,18 +124,32 @@ class Workflow:
 
     def _job_start(self, name: str, at: datetime) -> str:
         job_id = str(uuid4())
-        self.database.record_job(job_id, name, at, "running", "started")
+        self.database.start_job(job_id, name, at, timedelta(seconds=self.settings.job_lease_seconds))
         return job_id
+
+    def _job_heartbeat(self, job_id: str) -> datetime:
+        heartbeat_at = datetime.now(SHANGHAI_TZ)
+        renewed = self.database.heartbeat_job(
+            job_id,
+            heartbeat_at,
+            timedelta(seconds=self.settings.job_lease_seconds),
+        )
+        if not renewed:
+            raise JobLeaseLostError(f"job lease is no longer active: {job_id}")
+        return heartbeat_at
+
+    def recover_expired_jobs(self, at: datetime | None = None) -> list[str]:
+        return self.database.recover_expired_jobs(at or datetime.now(SHANGHAI_TZ))
 
     def _job_finish(
         self, job_id: str, name: str, started: datetime, status: str, message: str, **metadata: Any
     ) -> None:
-        self.database.record_job(
-            job_id, name, started, status, message, finished_at=datetime.now(SHANGHAI_TZ), metadata=metadata
-        )
+        del name, started
+        finished_at = self._job_heartbeat(job_id)
+        self.database.finish_job(job_id, finished_at, status, message, metadata)
 
-    @staticmethod
     def _job_completion(
+        self,
         job_id: str,
         name: str,
         started: datetime,
@@ -143,11 +157,12 @@ class Workflow:
         message: str,
         **metadata: Any,
     ) -> JobCompletion:
+        finished_at = self._job_heartbeat(job_id)
         return JobCompletion(
             job_run_id=job_id,
             job_name=name,
             started_at=started,
-            finished_at=datetime.now(SHANGHAI_TZ),
+            finished_at=finished_at,
             status=status,
             message=message,
             metadata=metadata,
@@ -259,8 +274,10 @@ class Workflow:
         job_id = self._job_start("sync-eod", started)
         try:
             securities = self.market_provider.fetch_securities()
+            self._job_heartbeat(job_id)
             self.database.upsert_securities(securities)
             calendar = self.market_provider.fetch_trade_calendar(start, end)
+            self._job_heartbeat(job_id)
             self.database.upsert_trade_calendar(calendar)
             open_dates = [row["cal_date"] for row in calendar.to_dict("records") if bool(row["is_open"])]
             rows = 0
@@ -273,12 +290,14 @@ class Workflow:
                     (list_dates <= pd.Timestamp(end)) & (delist_dates.isna() | (delist_dates >= pd.Timestamp(start)))
                 ]
                 for frame in range_loader(start, end, eligible["ts_code"].astype(str).tolist()):
+                    self._job_heartbeat(job_id)
                     self.database.upsert_daily_bars(frame)
                     self._raw_range_snapshot(provider_name, "daily", start, end, frame)
                     rows += len(frame)
             else:
                 for trade_date in open_dates:
                     frame = self.market_provider.fetch_daily(trade_date)
+                    self._job_heartbeat(job_id)
                     self.database.upsert_daily_bars(frame)
                     self._raw_snapshot(provider_name, "daily", trade_date, frame)
                     rows += len(frame)
@@ -297,6 +316,7 @@ class Workflow:
             frame = self.market_provider.fetch_trade_calendar(
                 at.date() - timedelta(days=10), at.date() + timedelta(days=10)
             )
+            self._job_heartbeat(job_id)
             self.database.upsert_trade_calendar(frame)
             confirmed = self.database.is_trading_day(at.date()) or bool(
                 not frame.empty and (pd.to_datetime(frame["cal_date"]).dt.date == at.date()).any()
@@ -383,6 +403,7 @@ class Workflow:
                 tradable=False,
             ).transition_to(ResearchRunState.COLLECTING_DATA)
             quotes = self.live_provider.fetch_quotes()
+            self._job_heartbeat(job_id)
             self.database.insert_live_quotes(quotes)
             self._raw_snapshot("akshare", "quotes", as_of, quotes)
             quote_times = (
@@ -397,6 +418,7 @@ class Workflow:
 
             news_fetch_start = datetime.combine((as_of - timedelta(days=10)).date(), time(0, 0), tzinfo=SHANGHAI_TZ)
             news = self._sync_news(news_fetch_start, as_of)
+            self._job_heartbeat(job_id)
             bars = self.database.get_recent_daily_bars(150, as_of=as_of.date() - timedelta(days=1))
             expected_eod = self.database.previous_trading_day(as_of.date())
             latest_eod = pd.to_datetime(bars["trade_date"], errors="coerce").max() if not bars.empty else pd.NaT
@@ -434,6 +456,7 @@ class Workflow:
                 unprocessed,
                 morning_codes,
             )
+            self._job_heartbeat(job_id)
             tradable = window_ok and data_fresh and eod_fresh and news.official_healthy and bool(scored.candidates)
             status = RunStatus.SUCCESS if tradable and news.mainstream_healthy else RunStatus.DEGRADED
             message_parts = news.messages.copy()
@@ -527,6 +550,7 @@ class Workflow:
             ).transition_to(ResearchRunState.COLLECTING_DATA)
             news_start = datetime.combine((as_of - timedelta(days=10)).date(), time(0), tzinfo=SHANGHAI_TZ)
             news = self._sync_news(news_start, as_of)
+            self._job_heartbeat(job_id)
             bars = self.database.get_recent_daily_bars(150, as_of=as_of.date() - timedelta(days=1))
             expected_eod = self.database.previous_trading_day(as_of.date())
             latest_eod = pd.to_datetime(bars["trade_date"], errors="coerce").max() if not bars.empty else pd.NaT
@@ -557,6 +581,7 @@ class Workflow:
                 events,
                 unprocessed,
             )
+            self._job_heartbeat(job_id)
             status = RunStatus.SUCCESS if eod_fresh and news.official_healthy else RunStatus.DEGRADED
             messages = list(news.messages)
             if not eod_fresh:
@@ -596,8 +621,16 @@ class Workflow:
 
     def evaluate_morning(self, at: datetime | None = None) -> list[object]:
         at = at or datetime.now(SHANGHAI_TZ)
-        run = self.database.latest_signal_run(at.date(), SignalKind.MORNING_WATCHLIST.value)
-        return self.evaluation.evaluate(run, at) if run and run["status"] in {"success", "degraded"} else []
+        started = datetime.now(SHANGHAI_TZ)
+        job_id = self._job_start("evaluate-morning", started)
+        try:
+            run = self.database.latest_signal_run(at.date(), SignalKind.MORNING_WATCHLIST.value)
+            outcomes = self.evaluation.evaluate(run, at) if run and run["status"] in {"success", "degraded"} else []
+            self._job_finish(job_id, "evaluate-morning", started, "success", f"evaluated {len(outcomes)} candidates")
+            return outcomes
+        except Exception as exc:
+            self._job_finish(job_id, "evaluate-morning", started, "failed", str(exc))
+            raise
 
     def evaluate_previous_preclose(self, at: datetime | None = None) -> list[object]:
         at = at or datetime.now(SHANGHAI_TZ)
@@ -626,6 +659,7 @@ class Workflow:
                 self._job_finish(job_id, "capture-fill", started, "degraded", "没有可交易的当日信号")
                 return []
             quotes = self.live_provider.fetch_quotes()
+            self._job_heartbeat(job_id)
             self.database.insert_live_quotes(quotes)
             self._raw_snapshot("akshare", "quotes", at, quotes)
             fills = self.portfolio.capture_buy_fills(str(run["run_id"]), at, quotes)
@@ -648,6 +682,7 @@ class Workflow:
             self._job_finish(job_id, "monitor-paper", started, "success", "outside trading session; no-op")
             return []
         try:
+            self._job_heartbeat(job_id)
             fills = self.portfolio.monitor_positions(at)
             self._job_finish(job_id, "monitor-paper", started, "success", f"closed {len(fills)} positions")
             return fills
@@ -670,8 +705,10 @@ class Workflow:
             )
             news_start = datetime.combine((at - timedelta(days=10)).date(), time(0, 0), tzinfo=SHANGHAI_TZ)
             news = self._sync_news(news_start, at)
+            self._job_heartbeat(job_id)
             self.evaluate_morning(at)
             self.evaluate_previous_preclose(at)
+            self._job_heartbeat(job_id)
             candidates = self.database.get_candidates(str(run["run_id"])) if run else pd.DataFrame()
             events = self.database.get_risk_events(run_time, at)
             context = {

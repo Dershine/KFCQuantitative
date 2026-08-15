@@ -31,6 +31,9 @@ class FakeWorkflow:
     def run_postclose(self):
         return None
 
+    def recover_expired_jobs(self):
+        return []
+
 
 class FakeScheduler:
     def __init__(self, **kwargs):
@@ -59,4 +62,17 @@ def test_scheduler_builds_triggers_from_schedule_policy(settings, monkeypatch):
     assert "monitor-paper-0930" in jobs
     assert "monitor-paper-1500" in jobs
     assert "minute='*/1'" in str(jobs["heartbeat"])
+    assert fake.started
+
+
+def test_scheduler_recovers_expired_jobs_before_starting(settings, monkeypatch, caplog):
+    fake = FakeScheduler()
+    monkeypatch.setattr(FakeWorkflow, "recover_expired_jobs", lambda self: ["expired-job"])
+    monkeypatch.setattr(scheduler_module, "Workflow", FakeWorkflow)
+    monkeypatch.setattr(scheduler_module, "BlockingScheduler", lambda **kwargs: fake)
+    monkeypatch.setattr(scheduler_module, "write_heartbeat", lambda configured: None)
+
+    scheduler_module.run_scheduler(settings)
+
+    assert "expired-job" in caplog.text
     assert fake.started

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,9 @@ from kfcquant.models import (
     RiskEvent,
     SignalRun,
 )
+
+LOGGER = logging.getLogger(__name__)
+TERMINAL_JOB_STATUSES = frozenset({"success", "degraded", "failed", "missed"})
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS securities (
@@ -276,7 +280,31 @@ MIGRATIONS = (
                ELSE 'published' END""",
         ),
     ),
+    Migration(
+        4,
+        "job_leases",
+        (
+            """CREATE TABLE IF NOT EXISTS job_leases (
+               job_run_id VARCHAR PRIMARY KEY,
+               heartbeat_at TIMESTAMPTZ NOT NULL,
+               lease_expires_at TIMESTAMPTZ NOT NULL,
+               recovery_count INTEGER NOT NULL DEFAULT 0
+               )""",
+            """INSERT INTO job_leases (job_run_id, heartbeat_at, lease_expires_at, recovery_count)
+               SELECT job_run_id, started_at, started_at, 0
+               FROM job_runs WHERE status='running'
+               ON CONFLICT (job_run_id) DO NOTHING""",
+        ),
+    ),
 )
+
+
+class JobAlreadyRunningError(RuntimeError):
+    """Raised when a live lease already owns the same scheduled job."""
+
+
+class JobLeaseLostError(RuntimeError):
+    """Raised when a worker attempts to write after its lease expired or was recovered."""
 
 
 class Database:
@@ -589,7 +617,17 @@ class Database:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         connection.execute(
-            "INSERT OR REPLACE INTO job_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            """INSERT INTO job_runs (
+               job_run_id, job_name, scheduled_for, started_at, finished_at, status, message, metadata_json
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (job_run_id) DO UPDATE SET
+                 job_name=excluded.job_name,
+                 scheduled_for=excluded.scheduled_for,
+                 started_at=excluded.started_at,
+                 finished_at=excluded.finished_at,
+                 status=excluded.status,
+                 message=excluded.message,
+                 metadata_json=excluded.metadata_json""",
             [
                 job_run_id,
                 job_name,
@@ -600,6 +638,69 @@ class Database:
                 message,
                 json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True),
             ],
+        )
+
+    @staticmethod
+    def _ensure_legacy_job_leases(connection: duckdb.DuckDBPyConnection) -> None:
+        connection.execute(
+            """INSERT INTO job_leases (job_run_id, heartbeat_at, lease_expires_at, recovery_count)
+               SELECT job_run_id, started_at, started_at, 0
+               FROM job_runs
+               WHERE status='running'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM job_leases WHERE job_leases.job_run_id=job_runs.job_run_id
+                 )
+               ON CONFLICT (job_run_id) DO NOTHING"""
+        )
+
+    @classmethod
+    def _recover_expired_jobs(
+        cls, connection: duckdb.DuckDBPyConnection, recovered_at: datetime
+    ) -> list[str]:
+        cls._ensure_legacy_job_leases(connection)
+        expired = [
+            str(row[0])
+            for row in connection.execute(
+                """SELECT job_runs.job_run_id
+                   FROM job_runs JOIN job_leases USING (job_run_id)
+                   WHERE job_runs.status='running' AND job_leases.lease_expires_at < ?
+                   ORDER BY job_runs.started_at, job_runs.job_run_id""",
+                [recovered_at],
+            ).fetchall()
+        ]
+        for job_run_id in expired:
+            connection.execute(
+                """UPDATE job_runs
+                   SET finished_at=?, status='failed',
+                       message='lease expired; recovered after worker interruption'
+                   WHERE job_run_id=? AND status='running'""",
+                [recovered_at, job_run_id],
+            )
+            connection.execute(
+                "UPDATE job_leases SET recovery_count=recovery_count+1 WHERE job_run_id=?",
+                [job_run_id],
+            )
+        return expired
+
+    @staticmethod
+    def _assert_active_job_lease(
+        connection: duckdb.DuckDBPyConnection, job_run_id: str, at: datetime
+    ) -> None:
+        active = connection.execute(
+            """SELECT 1 FROM job_runs JOIN job_leases USING (job_run_id)
+               WHERE job_run_id=? AND status='running' AND lease_expires_at >= ?""",
+            [job_run_id, at],
+        ).fetchone()
+        if active is None:
+            raise JobLeaseLostError(f"job lease is no longer active: {job_run_id}")
+
+    @staticmethod
+    def _complete_job_lease(
+        connection: duckdb.DuckDBPyConnection, job_run_id: str, finished_at: datetime
+    ) -> None:
+        connection.execute(
+            "UPDATE job_leases SET heartbeat_at=? WHERE job_run_id=?",
+            [finished_at, job_run_id],
         )
 
     def save_signal_run(self, run: SignalRun) -> None:
@@ -818,11 +919,21 @@ class Database:
     def save_outcome(self, outcome: OpportunityOutcome) -> None:
         with self.connect() as connection:
             connection.execute(
-                "DELETE FROM opportunity_outcomes WHERE outcome_id=? OR position_id=?",
-                [outcome.outcome_id, outcome.position_id],
-            )
-            connection.execute(
-                "INSERT INTO opportunity_outcomes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                """INSERT INTO opportunity_outcomes (
+                   outcome_id, position_id, ts_code, entry_date, first_day_hit, five_day_hit,
+                   holding_days, net_return, max_favorable_excursion, max_adverse_excursion, recorded_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (position_id) DO UPDATE SET
+                     outcome_id=excluded.outcome_id,
+                     ts_code=excluded.ts_code,
+                     entry_date=excluded.entry_date,
+                     first_day_hit=excluded.first_day_hit,
+                     five_day_hit=excluded.five_day_hit,
+                     holding_days=excluded.holding_days,
+                     net_return=excluded.net_return,
+                     max_favorable_excursion=excluded.max_favorable_excursion,
+                     max_adverse_excursion=excluded.max_adverse_excursion,
+                     recorded_at=excluded.recorded_at""",
                 [
                     outcome.outcome_id,
                     outcome.position_id,
@@ -841,15 +952,23 @@ class Database:
     def save_candidate_outcome(self, outcome: CandidateOutcome) -> None:
         with self.connect() as connection:
             connection.execute(
-                "DELETE FROM candidate_outcomes WHERE outcome_id=? OR (run_id=? AND ts_code=?)",
-                [outcome.outcome_id, outcome.run_id, outcome.ts_code],
-            )
-            connection.execute(
                 """INSERT INTO candidate_outcomes (
                    outcome_id, run_id, ts_code, signal_kind, status, baseline_at,
                    baseline_price, target_price, hit_at, max_favorable_excursion,
                    max_adverse_excursion, reason, evaluated_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (run_id, ts_code) DO UPDATE SET
+                     outcome_id=excluded.outcome_id,
+                     signal_kind=excluded.signal_kind,
+                     status=excluded.status,
+                     baseline_at=excluded.baseline_at,
+                     baseline_price=excluded.baseline_price,
+                     target_price=excluded.target_price,
+                     hit_at=excluded.hit_at,
+                     max_favorable_excursion=excluded.max_favorable_excursion,
+                     max_adverse_excursion=excluded.max_adverse_excursion,
+                     reason=excluded.reason,
+                     evaluated_at=excluded.evaluated_at""",
                 [
                     outcome.outcome_id,
                     outcome.run_id,
@@ -924,40 +1043,137 @@ class Database:
             ).fetchone()
         return row[0] if row else None
 
-    def record_job(
+    def start_job(
         self,
         job_run_id: str,
         job_name: str,
         started_at: datetime,
-        status: str,
-        message: str,
-        finished_at: datetime | None = None,
+        lease_duration: timedelta,
         scheduled_for: datetime | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> list[str]:
+        if lease_duration <= timedelta(0):
+            raise ValueError("job lease duration must be positive")
         with self.connect() as connection:
-            self._write_job(
-                connection,
-                job_run_id,
-                job_name,
-                started_at,
-                status,
-                message,
-                finished_at,
-                scheduled_for,
-                metadata,
-            )
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                recovered = self._recover_expired_jobs(connection, started_at)
+                active = connection.execute(
+                    """SELECT job_runs.job_run_id
+                       FROM job_runs LEFT JOIN job_leases USING (job_run_id)
+                       WHERE job_name=? AND status='running'
+                         AND (job_leases.job_run_id IS NULL OR lease_expires_at >= ?)
+                       LIMIT 1""",
+                    [job_name, started_at],
+                ).fetchone()
+                if active is not None:
+                    raise JobAlreadyRunningError(f"job already has an active lease: {job_name}")
+                self._write_job(
+                    connection,
+                    job_run_id,
+                    job_name,
+                    started_at,
+                    "running",
+                    "started",
+                    scheduled_for=scheduled_for,
+                    metadata=metadata,
+                )
+                connection.execute(
+                    """INSERT INTO job_leases (
+                       job_run_id, heartbeat_at, lease_expires_at, recovery_count
+                       ) VALUES (?, ?, ?, 0)
+                       ON CONFLICT (job_run_id) DO UPDATE SET
+                         heartbeat_at=excluded.heartbeat_at,
+                         lease_expires_at=excluded.lease_expires_at,
+                         recovery_count=0""",
+                    [job_run_id, started_at, started_at + lease_duration],
+                )
+                connection.execute("COMMIT")
+                if recovered:
+                    LOGGER.warning("recovered expired jobs before starting %s: %s", job_name, ",".join(recovered))
+                return recovered
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def heartbeat_job(self, job_run_id: str, heartbeat_at: datetime, lease_duration: timedelta) -> bool:
+        if lease_duration <= timedelta(0):
+            raise ValueError("job lease duration must be positive")
+        with self.connect() as connection:
+            renewed = connection.execute(
+                """UPDATE job_leases
+                   SET heartbeat_at=?, lease_expires_at=?
+                   WHERE job_run_id=? AND lease_expires_at >= ?
+                     AND EXISTS (
+                       SELECT 1 FROM job_runs
+                       WHERE job_runs.job_run_id=job_leases.job_run_id AND status='running'
+                     )
+                   RETURNING job_run_id""",
+                [heartbeat_at, heartbeat_at + lease_duration, job_run_id, heartbeat_at],
+            ).fetchone()
+        return renewed is not None
+
+    def finish_job(
+        self,
+        job_run_id: str,
+        finished_at: datetime,
+        status: str,
+        message: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if status not in TERMINAL_JOB_STATUSES:
+            raise ValueError(f"finish_job requires a terminal status: {status}")
+        with self.connect() as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                self._assert_active_job_lease(connection, job_run_id, finished_at)
+                current = connection.execute(
+                    "SELECT job_name, started_at, scheduled_for FROM job_runs WHERE job_run_id=?",
+                    [job_run_id],
+                ).fetchone()
+                self._write_job(
+                    connection,
+                    job_run_id,
+                    str(current[0]),
+                    current[1],
+                    status,
+                    message,
+                    finished_at=finished_at,
+                    scheduled_for=current[2],
+                    metadata=metadata,
+                )
+                self._complete_job_lease(connection, job_run_id, finished_at)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def recover_expired_jobs(self, recovered_at: datetime) -> list[str]:
+        with self.connect() as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                recovered = self._recover_expired_jobs(connection, recovered_at)
+                connection.execute("COMMIT")
+                if recovered:
+                    LOGGER.warning("recovered expired jobs: %s", ",".join(recovered))
+                return recovered
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
 
     def save_report(
         self, report_id: str, report_date: date, generated_at: datetime, report_type: str, content: str, model_name: str
     ) -> None:
         with self.connect() as connection:
             connection.execute(
-                "DELETE FROM reports WHERE report_id=? OR (report_date=? AND report_type=?)",
-                [report_id, report_date, report_type],
-            )
-            connection.execute(
-                "INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?)",
+                """INSERT INTO reports (
+                   report_id, report_date, generated_at, report_type, content, model_name
+                   ) VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (report_date, report_type) DO UPDATE SET
+                     report_id=excluded.report_id,
+                     generated_at=excluded.generated_at,
+                     content=excluded.content,
+                     model_name=excluded.model_name""",
                 [report_id, report_date, generated_at, report_type, content, model_name],
             )
 
@@ -974,6 +1190,7 @@ class Database:
             "risk_events",
             "news_documents",
             "job_runs",
+            "job_leases",
             "reports",
         }
         if name not in allowed:

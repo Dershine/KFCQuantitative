@@ -152,6 +152,7 @@ class DuckDBResearchRunUnitOfWork:
                 if self._is_identical_existing_publication(connection, run, candidates, orders, job):
                     connection.execute("COMMIT")
                     return False
+                self.database._assert_active_job_lease(connection, job.job_run_id, job.finished_at)
                 self.database._write_signal_run(connection, run)
                 self._checkpoint("run")
                 self.database._write_candidates(connection, candidates)
@@ -170,6 +171,7 @@ class DuckDBResearchRunUnitOfWork:
                     job.scheduled_for,
                     job.metadata,
                 )
+                self.database._complete_job_lease(connection, job.job_run_id, job.finished_at)
                 self._checkpoint("job")
                 connection.execute("COMMIT")
                 LOGGER.info(

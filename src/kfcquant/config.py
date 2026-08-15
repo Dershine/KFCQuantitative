@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     runtime_dir: Path = Path("runtime")
     backup_dir: Path = Path("backups")
     database_lock_timeout_seconds: int = Field(default=30, ge=0, le=3600)
+    job_lease_seconds: int = Field(default=900, ge=60, le=86_400)
     database_read_only: bool = False
     base_url_path: str = ""
 

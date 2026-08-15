@@ -59,6 +59,7 @@ def test_selection_policy_validates_the_shared_top_n_limit():
         {"market_provider": "unknown"},
         {"market_provider": "tushare", "tushare_token": None},
         {"strategy_version_morning": "contains whitespace"},
+        {"job_lease_seconds": 59},
         {
             "schedule": {
                 "preclose_run_at": "14:40",

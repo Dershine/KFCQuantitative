@@ -58,4 +58,4 @@ def test_custom_policy_flows_from_schedule_through_run_selection_and_orders(tmp_
     assert run.candidate_count == 3
     assert len(database.get_candidates(run.run_id)) == 3
     assert len(database.proposed_orders(run.run_id)) == 2
-    assert database.migration_version() == 3
+    assert database.migration_version() == 4

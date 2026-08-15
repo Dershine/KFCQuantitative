@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
 from kfcquant.config import SHANGHAI_TZ
-from kfcquant.db import Database
+from kfcquant.db import Database, JobLeaseLostError
 from kfcquant.models import (
     CandidateScore,
     FactorBreakdown,
@@ -66,7 +66,7 @@ def prepare_database(settings):
     database = Database(settings.database_path, settings.initial_cash)
     database.initialize()
     run, candidates, orders, job = publication_fixture()
-    database.record_job(job.job_run_id, job.job_name, job.started_at, "running", "started")
+    database.start_job(job.job_run_id, job.job_name, job.started_at, timedelta(minutes=5))
     return database, run, candidates, orders, job
 
 
@@ -172,3 +172,20 @@ def test_published_run_is_immutable_after_first_commit(settings):
     changed = candidates[0].model_copy(update={"opportunity_score": 81})
     with pytest.raises(ValueError, match="immutable"):
         uow.commit(run, [changed], orders, job)
+
+
+def test_expired_job_cannot_publish_a_research_run(settings):
+    database, run, candidates, orders, job = prepare_database(settings)
+    database.recover_expired_jobs(job.started_at + timedelta(minutes=6))
+
+    with pytest.raises(JobLeaseLostError, match=job.job_run_id):
+        DuckDBResearchRunUnitOfWork(database).commit(
+            run,
+            candidates,
+            orders,
+            replace(job, finished_at=job.started_at + timedelta(minutes=6)),
+        )
+
+    assert database.latest_signal_run(include_non_terminal=True) is None
+    assert database.table("candidate_scores").empty
+    assert database.table("paper_orders").empty

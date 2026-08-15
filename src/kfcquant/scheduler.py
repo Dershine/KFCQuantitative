@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -9,9 +10,14 @@ from kfcquant.config import SHANGHAI_TZ, Settings
 from kfcquant.runtime import write_heartbeat
 from kfcquant.services.workflow import Workflow
 
+LOGGER = logging.getLogger(__name__)
+
 
 def run_scheduler(settings: Settings) -> None:
     workflow = Workflow(settings)
+    recovered = workflow.recover_expired_jobs()
+    if recovered:
+        LOGGER.warning("recovered expired jobs at scheduler startup job_run_ids=%s", ",".join(recovered))
     scheduler = BlockingScheduler(timezone=SHANGHAI_TZ, job_defaults={"coalesce": False, "max_instances": 1})
     schedule = settings.schedule
 

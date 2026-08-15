@@ -278,7 +278,13 @@ class DeploymentManager:
         try:
             with FileLock(self.settings.research_lock, timeout=5):
                 with duckdb.connect(str(self.settings.research_database), read_only=True) as connection:
-                    row = connection.execute("SELECT 1 FROM job_runs WHERE status='running' LIMIT 1").fetchone()
+                    row = connection.execute(
+                        """SELECT 1
+                           FROM job_runs LEFT JOIN job_leases USING (job_run_id)
+                           WHERE status='running'
+                             AND (job_leases.job_run_id IS NULL OR lease_expires_at >= current_timestamp)
+                           LIMIT 1"""
+                    ).fetchone()
                     return row is not None
         except Exception:
             return True
