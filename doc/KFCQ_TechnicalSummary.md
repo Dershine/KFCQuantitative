@@ -10,7 +10,7 @@
 | 首次建立 | 2026-08-15 |
 | 最近复核 | 2026-08-15 |
 | 项目版本基线 | `0.2.0` |
-| 源码基线 | `a6403123bad2a6cf87ca41d928a76779e3a663c6`（工作区） |
+| 源码基线 | `5b2c4bd037ef3ac2decb81f1074e0fbc3d4ef6e0`（工作区） |
 | 适用范围 | Research Service、Operations Manager、数据与部署基础设施 |
 | 目标读者 | 项目维护者、策略开发者、代码审查者、部署维护者 |
 | 领域语言 | 以根目录 `CONTEXT.md` 为准 |
@@ -97,7 +97,7 @@ KFCQuant 当前是一个面向个人使用、强调可审计和安全降级的 A
 | 影子组合一致性 | 中高 | 买卖成交具备事务和幂等保护 |
 | 部署与回滚 | 较高 | 具备CI验证、备份、健康检查和自动回滚 |
 | 单策略可维护性 | 中等 | 代码集中、测试较好，但评分职责较多 |
-| 多策略演进 | 偏低 | Strategy尚未成为一等架构对象 |
+| 多策略演进 | 中低 | Strategy契约与Registry已建立，归属、参数和共享内核仍待完成 |
 | 严格可复现性 | 偏低 | 缺少完整Run Manifest、数据版本和Prompt版本 |
 | 故障恢复 | 高 | Signal发布已整体原子化；Job具备续租、竞争隔离、过期回收和迟到写入隔离 |
 | 可观测性 | 中等 | 有Job、心跳和健康状态，缺少结构化指标与告警 |
@@ -189,7 +189,7 @@ flowchart LR
 |---|---|---|---|
 | Market Data | `providers/*`、`db.py`、`workflow.py` | 获取、标准化、质量校验、快照与查询 | Security、Calendar、DailyBar、LiveQuote |
 | Intelligence | `services/news.py`、`providers/qwen.py` | 文档、实体、事件、证据和风险抽取 | Document、RiskEvent |
-| Strategy | `services/scoring.py` | 股票池、特征、评分、风险门禁、候选选择 | StrategyContext、StrategyResult |
+| Strategy | `strategy/*`、`services/scoring.py` | 策略身份、输入契约、注册组装、股票池、特征、评分、风险门禁、候选选择 | StrategyContext、StrategyResult |
 | Portfolio | `services/portfolio.py`、`db.py` | 订单、成交、现金、仓位、退出策略 | PaperOrder、PaperFill、PaperPosition |
 | Evaluation | `services/evaluation.py` | 信号效果和组合效果评估 | CandidateOutcome、OpportunityOutcome |
 | Research Run | `services/workflow.py` | 编排一次原子、可恢复、可追踪的运行 | Run Manifest、Signal Run |
@@ -207,6 +207,7 @@ KFCQuantitative/
 ├── src/kfcquant/                 Research Service
 │   ├── providers/                外部数据与LLM适配器
 │   ├── services/                 评分、资讯、组合、评估、报告和编排
+│   ├── strategy/                 Strategy契约、内置适配器与Registry组装
 │   ├── models.py                 跨研究域模型
 │   ├── interfaces.py             Provider Protocol
 │   ├── policies.py               类型化调度、窗口和候选选择Policy
@@ -240,7 +241,9 @@ flowchart TD
     ProviderFactory --> NewsProvider["NewsProvider"]
     ProviderFactory --> LLMProvider["LLMProvider"]
 
-    Workflow --> Scoring["ScoringService"]
+    Workflow --> StrategyRegistry["StrategyRegistry"]
+    StrategyRegistry --> Strategy["Morning / Pre-close Strategy"]
+    Strategy --> Scoring["ScoringService"]
     Workflow --> News["NewsService"]
     Workflow --> Portfolio["PortfolioService"]
     Workflow --> Evaluation["CandidateEvaluationService"]
@@ -358,6 +361,7 @@ flowchart TD
 - Signal Run具有类型化生命周期，业务查询只消费明确可读终态；
 - Signal Run、Candidates、Orders和Job完成状态由Research Run UoW统一事务发布。
 - Job租约独立存放于`job_leases`，保持旧版八列`job_runs`写入兼容；有效租约阻止同名竞争与部署，过期任务可在Scheduler启动时幂等回收。
+- Morning与Pre-close通过统一Strategy契约和Registry解析；现有`strategy_version_*`配置由内置Strategy Identity承接，持久化Schema保持不变。
 
 ### 4.6 部署拓扑
 
@@ -380,8 +384,9 @@ flowchart TD
 | 检查 | 结果 |
 |---|---|
 | Ruff | 通过 |
-| Pytest | 93项通过 |
-| 总覆盖率 | 71% |
+| Pytest | 102项通过 |
+| 总覆盖率 | 73% |
+| `strategy/*` | 100%语句覆盖；阶段专项100%分支覆盖 |
 | `services/scoring.py` | 92% |
 | `db.py` | 90% |
 | `unit_of_work.py` | 100% |
@@ -405,6 +410,7 @@ flowchart TD
 - Run生命周期合法转换、终态可见性和旧状态迁移；
 - Signal Run、Candidates、Orders与Job完成的原子发布及四阶段故障回滚。
 - Job租约续期、同名并发竞争、过期回收、迟到发布隔离与部署门禁；评估和报告原子Upsert失败保留旧值。
+- Strategy Identity/Context/Result/Protocol、Registry重复/缺项拒绝、两时段Registry注入和版本来源；Morning无买单与blocked Candidate无买单贯穿回归。
 
 尚未形成强保护的区域：
 
@@ -451,7 +457,7 @@ flowchart TD
 | TD-002 | HIGH | `running` Job没有租约和崩溃回收 | stale记录可能长期阻止部署 | M1 | `DONE` |
 | TD-003 | HIGH | 迁移逻辑集中在`initialize()`中的即席ALTER | 迁移顺序、失败恢复和兼容边界不清晰 | M1 | `DONE` |
 | TD-004 | HIGH | 时间窗口、Top N和部分规则分散硬编码 | 配置漂移和行为不一致 | M1 | `DONE` |
-| TD-005 | HIGH | Strategy不是一等接口 | 多策略、实验和Replay需要修改核心编排 | M2 | `NOT_STARTED` |
+| TD-005 | HIGH | Strategy不是一等接口 | 多策略、实验和Replay需要修改核心编排 | M2 | `DONE` |
 | TD-006 | HIGH | 策略版本只是自由字符串 | 无法严格绑定代码、参数和因子定义 | M2 | `NOT_STARTED` |
 | TD-007 | HIGH | 缺少完整Run Manifest和数据快照引用 | 不能严格重放历史Signal Run | M3 | `NOT_STARTED` |
 | TD-008 | HIGH | Provider以无Schema的DataFrame作为跨层契约 | 外部字段、类型或单位漂移可能静默污染结果 | M3 | `NOT_STARTED` |
@@ -691,17 +697,20 @@ M1完成条件已满足：全部工作包`DONE`，Signal发布中断、Job崩溃
 
 | ID | 工作包 | 点数 | 主要交付物 | 验收标准 | 状态 |
 |---|---|---:|---|---|---|
-| M2-01 | Strategy契约 | 3 | Identity、Context、Result、Protocol | Morning与Pre-close可通过统一契约调用 | `NOT_STARTED` |
+| M2-01 | Strategy契约 | 3 | Identity、Context、Result、Protocol | Morning与Pre-close可通过统一契约调用 | `DONE` |
 | M2-02 | 股票池Policy | 3 | UniversePolicy | 主板、ST、上市时间、停牌和流动性规则独立测试 | `NOT_STARTED` |
 | M2-03 | 特征流水线 | 5 | FeaturePipeline与FeatureSchema | 特征计算不负责新闻、风险和排序 | `NOT_STARTED` |
 | M2-04 | 评分与风险分离 | 5 | ScoreModel、RiskPolicy | 技术分、资讯调整和硬阻断可独立测试 | `NOT_STARTED` |
 | M2-05 | SelectionPolicy | 2 | Top N、阈值和排序规则 | Workflow、Portfolio、Evaluation共用同一Policy | `NOT_STARTED` |
-| M2-06 | 策略Registry与依赖注入 | 3 | StrategyRegistry、bootstrap组装 | 新增策略不修改Workflow主体分支 | `NOT_STARTED` |
+| M2-06 | 策略Registry与依赖注入 | 3 | StrategyRegistry、bootstrap组装 | 新增策略不修改Workflow主体分支 | `DONE` |
 | M2-07 | 策略归属贯穿模型 | 5 | `strategy_id`进入Run、Order、Position、Outcome | 任一成交与评估可追溯到具体策略 | `NOT_STARTED` |
 | M2-08 | 参数快照与Hash | 3 | 规范化参数序列化 | 同一Hash代表同一参数；变更自动产生新Hash | `NOT_STARTED` |
 | M2-09 | Golden Snapshot测试 | 3 | 固定输入与输出基线 | 非预期候选或分数变化会使CI失败 | `NOT_STARTED` |
 
-M2总点数：`32`。完成条件：至少两套Strategy实现可共存，且不复制Workflow。
+M2进度：`6 / 32 = 18.8%`。完成条件：至少两套Strategy实现可共存，且不复制Workflow。
+
+- M2-01证据：新增类型化且不可变的Strategy Identity、Requirements、Context与Result，以及统一Protocol；Context拒绝无时区和晚于`as_of`的信息截止时间；Morning与Pre-close内置适配器均通过`evaluate(context)`调用现有确定性评分，阶段专项语句与分支覆盖率均为100%。
+- M2-06证据：StrategyRegistry按Signal Kind显式组装，重复注册、缺失注册和跨Signal Context均明确失败；Workflow启动要求两种Signal实现，通过注入版本不同的Registry完成Morning与Pre-close离线贯穿，持久化Run版本来自Registry Identity，新增/替换实现不需修改Workflow主体；既有原子发布、无买单门禁和配置兼容回归通过。
 
 ### M3：数据契约、血缘与LLM治理
 
@@ -770,12 +779,12 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 |---|---:|---:|---:|---|---|
 | M0 架构基线与治理 | 4 | 4 | 100% | `DONE` | 2026-08-15建立本文档并验证现有测试 |
 | M1 正确性、原子性与恢复 | 22 | 22 | 100% | `DONE` | 2026-08-15完成M1-C；93项测试、Ruff、Job崩溃/竞争恢复、原子Upsert、迁移兼容和pip check通过 |
-| M2 策略内核与多策略基础 | 0 | 32 | 0% | `NOT_STARTED` | — |
+| M2 策略内核与多策略基础 | 6 | 32 | 18.8% | `IN_PROGRESS` | 2026-08-15完成M2-A；102项测试、Strategy分支覆盖率100%、Ruff和Registry两时段贯穿通过 |
 | M3 数据契约、血缘与LLM治理 | 0 | 30 | 0% | `NOT_STARTED` | — |
 | M4 Replay与策略实验 | 0 | 30 | 0% | `NOT_STARTED` | — |
 | M5 模块化、可观测性与质量门禁 | 0 | 32 | 0% | `NOT_STARTED` | — |
 | M6 发布强化与规模决策 | 0 | 18 | 0% | `NOT_STARTED` | — |
-| **总体** | **26** | **168** | **15.5%** | `IN_PROGRESS` | M0与M1完成；下一阶段M2-A |
+| **总体** | **32** | **168** | **19.0%** | `IN_PROGRESS` | M0与M1完成，M2-A完成；下一阶段M2-B |
 
 ### 12.1 当前建议的下一工程阶段
 
@@ -786,13 +795,16 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 | M1-A | 配置与迁移底座 | M1-06、M1-07、M1-05 | 8 | M1-08 | `DONE` | 配置只有一个事实来源；非法启动配置被拒绝；迁移在空库、旧库、重复执行和失败恢复场景通过 |
 | M1-B | Run状态与原子发布 | M1-02、M1-01 | 8 | M1-A | `DONE` | Run状态转换受控；故障注入证明外部不会看到部分Published Run |
 | M1-C | 崩溃回收与原子更新 | M1-03、M1-04 | 5 | M1-B | `DONE` | 过期Job可回收；中途失败不丢失旧评估或报告；M1中断恢复场景通过 |
-| M2-A | Strategy契约与注册底座 | M2-01、M2-06 | 6 | M1 | `NOT_STARTED` | Morning与Pre-close通过统一Strategy契约和Registry组装；新增Strategy实现不修改Workflow主体分支 |
+| M2-A | Strategy契约与注册底座 | M2-01、M2-06 | 6 | M1 | `DONE` | Morning与Pre-close通过统一Strategy契约和Registry组装；新增Strategy实现不修改Workflow主体分支 |
+| M2-B | 股票池与特征流水线 | M2-02、M2-03 | 8 | M2-A | `NOT_STARTED` | 股票池规则可独立测试；类型化特征流水线不负责新闻、风险和排序；两时段Strategy保持现有候选结果 |
 
 `M1-A`已完成，阶段验收证据为：非默认Schedule/Selection从注册计划贯穿Pre-close运行与订单选择；空库、旧库、重复迁移、失败回滚与恢复通过；Ruff、60项全量测试、66%总覆盖率、pip check和PowerShell语法检查通过。
 
 `M1-B`已完成，阶段验收证据为：Run生命周期合法/非法转换、终态读取边界与五类旧状态升级通过；Pre-close离线端到端在一个事务发布Run、Candidates、Orders和Job终态；四阶段故障注入均无部分可见数据且中断后可安全重试；Morning仍不创建买单，非交易Run与blocked Candidate的买单被拒绝；Ruff、83项全量测试、71%总覆盖率和pip check通过。
 
-`M1-C`已完成，阶段验收证据为：Schema v4空库、旧库、重复执行、中途失败和恢复通过，且旧版八列`job_runs`写入兼容；续租阻止有效Job被回收，两个线程竞争同名任务只产生一个租约；过期Job幂等失败回收后可安全重跑，迟到Job完成和Research Run发布均被隔离；Operations仅让有效或不可验证租约阻止部署；三类评估/报告Upsert正常更新、重复保存和冲突失败保留旧值通过。Ruff、93项全量测试和Research Service 71%总覆盖率通过，`db.py`为90%、`unit_of_work.py`为100%。当前建议的下一工程阶段为`M2-A`，顺序为M2-01 → M2-06；不得在该阶段顺手拆分全部特征或评分职责。
+`M1-C`已完成，阶段验收证据为：Schema v4空库、旧库、重复执行、中途失败和恢复通过，且旧版八列`job_runs`写入兼容；续租阻止有效Job被回收，两个线程竞争同名任务只产生一个租约；过期Job幂等失败回收后可安全重跑，迟到Job完成和Research Run发布均被隔离；Operations仅让有效或不可验证租约阻止部署；三类评估/报告Upsert正常更新、重复保存和冲突失败保留旧值通过。Ruff、93项全量测试和Research Service 71%总覆盖率通过，`db.py`为90%、`unit_of_work.py`为100%。该阶段完成时建议的后续阶段为`M2-A`，顺序为M2-01 → M2-06，且不在该阶段顺手拆分全部特征或评分职责。
+
+`M2-A`已完成，阶段验收证据为：Morning与Pre-close均从StrategyRegistry解析统一Protocol并通过不可变、带information cutoff的StrategyContext执行；注入与配置不同版本的实现后，两种Signal Run均记录Registry Identity版本，证明替换Strategy不修改Workflow主体；重复/缺失注册和跨Signal Context失败关闭；Morning不创建订单、blocked Candidate和`tradable=false` Run不创建买单、M1-B原子发布与故障重试回归通过。Ruff、102项全量测试、73%总覆盖率、Strategy包100%语句/分支覆盖率和pip check通过。无Schema、迁移、依赖或部署变化；README与领域语言未变化。当前建议的下一工程阶段为`M2-B`，顺序为M2-02 → M2-03；不得在该阶段顺手拆分评分与风险或引入参数Hash。
 
 ### 12.2 阶段级Goal执行规则
 
@@ -1027,6 +1039,7 @@ worker_heartbeat_age_seconds
 | 2026-08-15 | `d41577776d8c`（工作区） | 完成M1-A：调度/选择Policy、Research/Ops启动校验、正式迁移Runner | M1-05/06/07、TD-003/004完成；M1为9/22点；总体13/168点；下一阶段M1-B | Ruff通过；60项测试通过；总覆盖率66%；迁移五类场景、阶段贯穿场景、pip check与PowerShell语法通过 |
 | 2026-08-15 | `d41577776d8c`（工作区） | 完成M1-B：Run状态机与Research Run原子发布UoW | M1-01/02、TD-001完成；M1为17/22点；总体21/168点；下一阶段M1-C | Ruff通过；83项测试通过；总覆盖率71%；UoW 100%；四阶段故障回滚、重试、迁移兼容与pip check通过 |
 | 2026-08-15 | `a6403123bad2`（工作区） | 完成M1-C：Job租约、崩溃回收、迟到写入隔离与评估/报告原子Upsert | M1-03/04、TD-002完成；M1为22/22点；总体26/168点；下一阶段M2-A | Ruff通过；93项测试通过；Research覆盖率71%；DB 90%、UoW 100%；Schema v4五类场景、线程竞争、崩溃恢复、部署门禁、Upsert故障保留和pip check通过 |
+| 2026-08-15 | `5b2c4bd037ef`（工作区） | 完成M2-A：Strategy统一契约、内置适配器、Registry与Workflow注入 | M2-01/06、TD-005完成；M2为6/32点；总体32/168点；下一阶段M2-B | Ruff通过；102项测试通过；总覆盖率73%；Strategy语句/分支覆盖率100%；两时段Registry贯穿、安全门禁、原子发布回归和pip check通过 |
 
 ---
 
@@ -1043,4 +1056,4 @@ KFCQuant当前不是混乱的脚本集合，而是边界意识较强、具备运
 5. M5降低模块耦合并建立主动观测；
 6. M6在真实指标证明需要时强化发布和扩展基础设施。
 
-M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；下一步进入M2-A建立Strategy契约与注册底座，但在M2和M3完成前仍不宜大规模并行增加策略。完成M4后，系统才具备完整实验闭环。
+M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2-A已建立Strategy契约与注册底座，下一步进入M2-B独立股票池与特征流水线，但在M2和M3完成前仍不宜大规模并行增加策略。完成M4后，系统才具备完整实验闭环。

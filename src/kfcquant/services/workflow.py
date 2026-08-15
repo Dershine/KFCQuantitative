@@ -24,7 +24,7 @@ from kfcquant.services.evaluation import CandidateEvaluationService
 from kfcquant.services.news import NewsService, NewsSyncResult
 from kfcquant.services.portfolio import PortfolioService
 from kfcquant.services.reports import ReportService
-from kfcquant.services.scoring import ScoringService
+from kfcquant.strategy import StrategyContext, StrategyRegistry, build_default_strategy_registry
 from kfcquant.unit_of_work import (
     DuckDBResearchRunUnitOfWork,
     JobCompletion,
@@ -44,6 +44,7 @@ class Workflow:
         news_provider: NewsProvider | None = None,
         llm_provider: LLMProvider | None = None,
         run_uow: ResearchRunUnitOfWork | None = None,
+        strategy_registry: StrategyRegistry | None = None,
     ):
         self.settings = settings
         self.database = database or Database(
@@ -63,7 +64,8 @@ class Workflow:
         ):
             self._news_provider = market_provider  # Backward-compatible composite test/provider.
         self._llm_provider = llm_provider
-        self.scoring = ScoringService(settings)
+        self.strategy_registry = strategy_registry or build_default_strategy_registry(settings)
+        self.strategy_registry.require((SignalKind.MORNING_WATCHLIST, SignalKind.PRECLOSE_ENTRY))
         self.portfolio = PortfolioService(self.database, settings, self.live_provider)
         self.evaluation = CandidateEvaluationService(self.database, settings, self.live_provider)
         self.run_uow = run_uow or DuckDBResearchRunUnitOfWork(self.database)
@@ -345,6 +347,7 @@ class Workflow:
         as_of = as_of or datetime.now(SHANGHAI_TZ)
         if as_of.tzinfo is None:
             as_of = as_of.replace(tzinfo=SHANGHAI_TZ)
+        strategy = self.strategy_registry.resolve(SignalKind.PRECLOSE_ENTRY)
         started = datetime.now(SHANGHAI_TZ)
         job_id = self._job_start("run-preclose", started)
         window_ok = self.settings.schedule.preclose_window.contains(as_of)
@@ -353,7 +356,7 @@ class Workflow:
             run = SignalRun(
                 as_of=as_of,
                 signal_kind=SignalKind.PRECLOSE_ENTRY,
-                strategy_version=self.settings.strategy_version_preclose,
+                strategy_version=strategy.identity.version,
                 information_cutoff=as_of,
                 status=RunStatus.MISSED,
                 data_fresh=False,
@@ -373,7 +376,7 @@ class Workflow:
             run = SignalRun(
                 as_of=as_of,
                 signal_kind=SignalKind.PRECLOSE_ENTRY,
-                strategy_version=self.settings.strategy_version_preclose,
+                strategy_version=strategy.identity.version,
                 information_cutoff=as_of,
                 status=RunStatus.MISSED,
                 data_fresh=False,
@@ -393,7 +396,7 @@ class Workflow:
             draft = SignalRun(
                 as_of=as_of,
                 signal_kind=SignalKind.PRECLOSE_ENTRY,
-                strategy_version=self.settings.strategy_version_preclose,
+                strategy_version=strategy.identity.version,
                 information_cutoff=as_of,
                 status=RunStatus.RUNNING,
                 lifecycle_state=ResearchRunState.CREATED,
@@ -446,15 +449,19 @@ class Workflow:
                     str(morning_run["run_id"]), include_blocked=False
                 ).head(self.settings.selection.top_n)
                 morning_codes = set(morning_frame["ts_code"].astype(str)) if not morning_frame.empty else set()
-            scored = self.scoring.score(
-                provisional.run_id,
-                securities,
-                bars,
-                quotes,
-                as_of,
-                events,
-                unprocessed,
-                morning_codes,
+            scored = strategy.evaluate(
+                StrategyContext(
+                    run_id=provisional.run_id,
+                    signal_kind=SignalKind.PRECLOSE_ENTRY,
+                    as_of=as_of,
+                    information_cutoff=provisional.information_cutoff or as_of,
+                    securities=securities,
+                    bars=bars,
+                    quotes=quotes,
+                    risk_events=events,
+                    unprocessed_official_codes=frozenset(unprocessed),
+                    previous_signal_codes=frozenset(morning_codes),
+                )
             )
             self._job_heartbeat(job_id)
             tradable = window_ok and data_fresh and eod_fresh and news.official_healthy and bool(scored.candidates)
@@ -507,6 +514,7 @@ class Workflow:
         as_of = as_of or datetime.now(SHANGHAI_TZ)
         if as_of.tzinfo is None:
             as_of = as_of.replace(tzinfo=SHANGHAI_TZ)
+        strategy = self.strategy_registry.resolve(SignalKind.MORNING_WATCHLIST)
         started = datetime.now(SHANGHAI_TZ)
         job_id = self._job_start("run-morning", started)
         window_ok = self.settings.schedule.morning_window.contains(as_of)
@@ -519,7 +527,7 @@ class Workflow:
             run = SignalRun(
                 as_of=as_of,
                 signal_kind=SignalKind.MORNING_WATCHLIST,
-                strategy_version=self.settings.strategy_version_morning,
+                strategy_version=strategy.identity.version,
                 information_cutoff=as_of,
                 status=RunStatus.MISSED,
                 data_fresh=False,
@@ -539,7 +547,7 @@ class Workflow:
             draft = SignalRun(
                 as_of=as_of,
                 signal_kind=SignalKind.MORNING_WATCHLIST,
-                strategy_version=self.settings.strategy_version_morning,
+                strategy_version=strategy.identity.version,
                 information_cutoff=as_of,
                 status=RunStatus.RUNNING,
                 lifecycle_state=ResearchRunState.CREATED,
@@ -573,13 +581,17 @@ class Workflow:
                     "mainstream_news_healthy": news.mainstream_healthy,
                 }
             ).transition_to(ResearchRunState.EVALUATING)
-            scored = self.scoring.score_morning(
-                provisional.run_id,
-                self.database.get_securities(),
-                bars,
-                as_of,
-                events,
-                unprocessed,
+            scored = strategy.evaluate(
+                StrategyContext(
+                    run_id=provisional.run_id,
+                    signal_kind=SignalKind.MORNING_WATCHLIST,
+                    as_of=as_of,
+                    information_cutoff=provisional.information_cutoff or as_of,
+                    securities=self.database.get_securities(),
+                    bars=bars,
+                    risk_events=events,
+                    unprocessed_official_codes=frozenset(unprocessed),
+                )
             )
             self._job_heartbeat(job_id)
             status = RunStatus.SUCCESS if eod_fresh and news.official_healthy else RunStatus.DEGRADED
