@@ -159,9 +159,10 @@ KFCQUANT_SCHEDULE__FILL_WINDOW_START=14:43
 KFCQUANT_SCHEDULE__FILL_WINDOW_END=14:50
 KFCQUANT_SELECTION__TOP_N=10
 KFCQUANT_SELECTION__CANDIDATE_LIMIT=100
+KFCQUANT_SELECTION__MINIMUM_OPPORTUNITY_SCORE=0
 ```
 
-`TOP_N`同时约束早盘连续性、评估、报告和候选订单，且不能小于最大持仓数；`CANDIDATE_LIMIT`不能小于`TOP_N`。可用 `kfcquant schedule-plan --json`查看校验后的实际注册计划。
+`MINIMUM_OPPORTUNITY_SCORE`先过滤低于阈值的候选；随后同一选择Policy按“未阻断优先、机会分降序、股票代码升序”确定排名。`TOP_N`同时约束早盘连续性、评估、报告和候选订单，且不能小于最大持仓数；`CANDIDATE_LIMIT`不能小于`TOP_N`。可用 `kfcquant schedule-plan --json`查看校验后的实际注册计划。
 
 本机必须保持开机和联网。错过的窗口记录为`missed`，不会事后伪造成交。网页关闭不影响计划任务。
 

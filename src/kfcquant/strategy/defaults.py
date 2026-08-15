@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from kfcquant.config import Settings
 from kfcquant.models import SignalKind
-from kfcquant.services.scoring import ScoringService
 from kfcquant.strategy.contracts import (
     StrategyContext,
     StrategyIdentity,
@@ -19,6 +18,8 @@ class MorningWatchlistStrategy:
     requirements = StrategyRequirements()
 
     def __init__(self, settings: Settings) -> None:
+        from kfcquant.services.scoring import ScoringService
+
         self.identity = StrategyIdentity("morning-watchlist", settings.strategy_version_morning)
         self._universe = UniversePolicy.from_settings(settings)
         self._features = FeaturePipeline.from_settings(settings)
@@ -47,6 +48,8 @@ class PrecloseEntryStrategy:
     requirements = StrategyRequirements(requires_quotes=True, requires_previous_signals=True)
 
     def __init__(self, settings: Settings) -> None:
+        from kfcquant.services.scoring import ScoringService
+
         self.identity = StrategyIdentity("preclose-entry", settings.strategy_version_preclose)
         self._universe = UniversePolicy.from_settings(settings)
         self._features = FeaturePipeline.from_settings(settings)

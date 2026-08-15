@@ -445,9 +445,9 @@ class Workflow:
             morning_run = self.database.latest_signal_run(as_of.date(), SignalKind.MORNING_WATCHLIST.value)
             morning_codes: set[str] = set()
             if morning_run:
-                morning_frame = self.database.get_candidates(
-                    str(morning_run["run_id"]), include_blocked=False
-                ).head(self.settings.selection.top_n)
+                morning_frame = self.settings.selection.select_frame(
+                    self.database.get_candidates(str(morning_run["run_id"]), include_blocked=True)
+                )
                 morning_codes = set(morning_frame["ts_code"].astype(str)) if not morning_frame.empty else set()
             scored = strategy.evaluate(
                 StrategyContext(
@@ -464,7 +464,8 @@ class Workflow:
                 )
             )
             self._job_heartbeat(job_id)
-            tradable = window_ok and data_fresh and eod_fresh and news.official_healthy and bool(scored.candidates)
+            selected = self.settings.selection.select_candidates(scored.candidates)
+            tradable = window_ok and data_fresh and eod_fresh and news.official_healthy and bool(selected)
             status = RunStatus.SUCCESS if tradable and news.mainstream_healthy else RunStatus.DEGRADED
             message_parts = news.messages.copy()
             if not data_fresh:
@@ -727,7 +728,7 @@ class Workflow:
                 "report_date": at.date().isoformat(),
                 "signal_as_of": str(run_time),
                 "preclose_label": self.settings.schedule.preclose_run_at.strftime("%H:%M"),
-                "candidates": candidates.head(self.settings.selection.top_n).to_dict("records"),
+                "candidates": self.settings.selection.select_frame(candidates).to_dict("records"),
                 "positions": self.database.get_open_positions().to_dict("records"),
                 "cash": self.database.get_cash(),
                 "after_entry_events": events.to_dict("records"),

@@ -16,8 +16,8 @@ class CandidateEvaluationService:
 
     def evaluate(self, run: dict[str, object], evaluation_date: datetime) -> list[CandidateOutcome]:
         kind = SignalKind(str(run["signal_kind"]))
-        candidates = self.database.get_candidates(str(run["run_id"]), include_blocked=False).head(
-            self.settings.selection.top_n
+        candidates = self.settings.selection.select_frame(
+            self.database.get_candidates(str(run["run_id"]), include_blocked=True)
         )
         outcomes: list[CandidateOutcome] = []
         signal_at = run["as_of"]

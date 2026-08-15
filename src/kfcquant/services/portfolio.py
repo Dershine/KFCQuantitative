@@ -109,8 +109,8 @@ class PortfolioService:
         target_value = self.settings.initial_cash * self.settings.position_fraction
         planned: list[PaperOrder] = []
         # Reserve orders are bounded by the shared selection policy; fills still stop when slots are full.
-        for candidate in candidates:
-            if candidate.rank > self.settings.selection.top_n or candidate.blocked or candidate.ts_code in held:
+        for candidate in self.settings.selection.select_candidates(candidates):
+            if candidate.ts_code in held:
                 continue
             order = PaperOrder(
                 run_id=run.run_id,

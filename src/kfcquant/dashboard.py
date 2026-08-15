@@ -84,7 +84,7 @@ with tabs[0]:
         if candidates.empty:
             st.info("没有满足条件的候选。")
         else:
-            top = candidates.head(settings.selection.top_n).copy()
+            top = settings.selection.select_frame(candidates)
             top["风险状态"] = top["blocked"].map({True: "已排除", False: "通过"})
             st.dataframe(
                 top[["rank", "ts_code", "name", "opportunity_score", "风险状态", "quote_at"]],

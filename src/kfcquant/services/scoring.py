@@ -7,8 +7,10 @@ import numpy as np
 import pandas as pd
 
 from kfcquant.config import Settings
-from kfcquant.models import CandidateScore, FactorBreakdown
+from kfcquant.models import CandidateScore, FactorBreakdown, SignalKind
 from kfcquant.policies import SchedulePolicy
+from kfcquant.strategy.risk import RiskPolicy
+from kfcquant.strategy.scoring import ScoreModel
 
 
 def is_shenzhen_shanghai_main_board(ts_code: str) -> bool:
@@ -25,12 +27,6 @@ def trading_minutes_elapsed(at: datetime, schedule: SchedulePolicy | None = None
     return elapsed(at, schedule)
 
 
-def _percentile(series: pd.Series) -> pd.Series:
-    if series.nunique(dropna=True) <= 1:
-        return pd.Series(50.0, index=series.index)
-    return series.rank(method="average", pct=True).fillna(0.0) * 100.0
-
-
 @dataclass
 class ScoringResult:
     candidates: list[CandidateScore]
@@ -39,10 +35,11 @@ class ScoringResult:
 
 
 class ScoringService:
-    """Applies scores and risk to already selected, calculated market features."""
+    """Compatibility facade that composes technical score, risk, and selection policies."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.score_model = ScoreModel()
 
     @staticmethod
     def combine_exclusion_counts(
@@ -83,6 +80,65 @@ class ScoringService:
             self.combine_exclusion_counts(universe.exclusion_counts, features.exclusion_counts, len(features.frame)),
         )
 
+    def _build_candidates(
+        self,
+        run_id: str,
+        scored_features: pd.DataFrame,
+        signal_kind: SignalKind,
+        risk_policy: RiskPolicy,
+        morning_codes: set[str] | None = None,
+    ) -> list[CandidateScore]:
+        morning = morning_codes or set()
+        candidates: list[CandidateScore] = []
+        for row in scored_features.to_dict("records"):
+            code = str(row["ts_code"])
+            assessment = risk_policy.assess(code, signal_kind)
+            continuity_score = 0.0
+            morning_status = "not_applicable"
+            if signal_kind == SignalKind.PRECLOSE_ENTRY:
+                confirmed = (
+                    code in morning
+                    and float(row["intraday_strength"]) > 0
+                    and float(row["close_location"]) >= 0.5
+                )
+                continuity_score = 3.0 if confirmed else 0.0
+                morning_status = "confirmed" if confirmed else ("invalidated" if code in morning else "new")
+            opportunity_score = float(
+                np.clip(
+                    float(row["technical_score"])
+                    + assessment.news_score
+                    + continuity_score
+                    - assessment.news_penalty,
+                    0.0,
+                    100.0,
+                )
+            )
+            factor_values = {
+                field: row[field]
+                for field in FactorBreakdown.model_fields
+                if field in row
+            }
+            factor_values.update(
+                news_score=assessment.news_score,
+                continuity_score=continuity_score,
+                morning_status=morning_status,
+            )
+            candidates.append(
+                CandidateScore(
+                    run_id=run_id,
+                    ts_code=code,
+                    name=str(row["name"]),
+                    rank=1,
+                    opportunity_score=round(opportunity_score, 4),
+                    factor_breakdown=FactorBreakdown.model_validate(factor_values),
+                    risk_event_ids=list(assessment.risk_event_ids),
+                    blocked=assessment.blocked,
+                    block_reasons=list(assessment.block_reasons),
+                    quote_at=row["quote_at"],
+                )
+            )
+        return self.settings.selection.rank_candidates(candidates)
+
     def score_preclose_features(
         self,
         run_id: str,
@@ -92,104 +148,18 @@ class ScoringService:
         morning_codes: set[str] | None = None,
         exclusion_counts: dict[str, int] | None = None,
     ) -> ScoringResult:
-        frame = features.copy()
-        exclusions = exclusion_counts or {"eligible": len(frame)}
-        if frame.empty:
+        exclusions = exclusion_counts or {"eligible": len(features)}
+        if features.empty:
             return ScoringResult([], 0, exclusions)
-
-        positive = (
-            0.25 * _percentile(frame["ret_5d"])
-            + 0.15 * _percentile(frame["ret_20d"])
-            + 0.20 * _percentile(frame["intraday_strength"])
-            + 0.15 * _percentile(frame["close_location"])
-            + 0.15 * _percentile(frame["projected_volume_ratio"])
-            + 0.10 * _percentile(np.log1p(frame["median_amount_20d"]))
+        scored = self.score_model.score_preclose(features)
+        candidates = self._build_candidates(
+            run_id,
+            scored,
+            SignalKind.PRECLOSE_ENTRY,
+            RiskPolicy(risk_events, unprocessed_official_codes),
+            morning_codes,
         )
-        abnormal_volume = np.clip((frame["projected_volume_ratio"] - 3.0) / 2.0, 0.0, 1.0)
-        penalty = (
-            8.0 * _percentile(frame["volatility_20d"]) / 100.0
-            + 4.0 * _percentile(frame["gap_abs"]) / 100.0
-            + 4.0 * frame["limit_proximity"]
-            + 4.0 * abnormal_volume
-        )
-        frame["positive_score"] = positive
-        frame["risk_penalty"] = np.clip(penalty, 0.0, 20.0)
-        frame["technical_score"] = np.clip(
-            0.9 * (frame["positive_score"] - frame["risk_penalty"]), 0.0, 90.0
-        )
-
-        events_by_code: dict[str, list[dict[str, object]]] = {}
-        if risk_events is not None and not risk_events.empty:
-            for event in risk_events.to_dict("records"):
-                code = event.get("ts_code")
-                if code:
-                    events_by_code.setdefault(str(code), []).append(event)
-        unprocessed = unprocessed_official_codes or set()
-        morning = morning_codes or set()
-
-        staged: list[dict[str, object]] = []
-        for row in frame.to_dict("records"):
-            code = str(row["ts_code"])
-            related = events_by_code.get(code, [])
-            positive_events = [event for event in related if str(event.get("direction")) == "positive"]
-            negative_events = [event for event in related if str(event.get("direction")) == "negative"]
-            news_score = min(sum(float(event.get("confidence", 0.0)) * 2.5 for event in positive_events), 7.0)
-            news_penalty = min(
-                sum(
-                    {"low": 1.0, "medium": 3.0, "high": 7.0, "critical": 15.0}.get(
-                        str(event.get("severity")), 0.0
-                    )
-                    for event in negative_events
-                ),
-                20.0,
-            )
-            confirmed = (
-                code in morning
-                and float(row["intraday_strength"]) > 0
-                and float(row["close_location"]) >= 0.5
-            )
-            row["news_score"] = news_score
-            row["continuity_score"] = 3.0 if confirmed else 0.0
-            row["morning_status"] = "confirmed" if confirmed else ("invalidated" if code in morning else "new")
-            row["opportunity_score"] = float(
-                np.clip(row["technical_score"] + news_score + row["continuity_score"] - news_penalty, 0.0, 100.0)
-            )
-            reasons: list[str] = []
-            if code in unprocessed:
-                reasons.append("存在尚未完成抽取的官方公告")
-            for event in related:
-                if bool(event.get("hard_block")):
-                    reasons.append(f"{event.get('event_type')}: {event.get('evidence')}")
-            row["blocked"] = bool(reasons)
-            row["block_reasons"] = reasons
-            row["risk_event_ids"] = [str(event["event_id"]) for event in related]
-            staged.append(row)
-
-        staged.sort(key=lambda item: (bool(item["blocked"]), -float(item["opportunity_score"]), str(item["ts_code"])))
-        candidates: list[CandidateScore] = []
-        for index, row in enumerate(staged, start=1):
-            breakdown = FactorBreakdown.model_validate(
-                {field: row[field] for field in FactorBreakdown.model_fields if field in row}
-            )
-            candidates.append(
-                CandidateScore(
-                    run_id=run_id,
-                    ts_code=str(row["ts_code"]),
-                    name=str(row["name"]),
-                    rank=index,
-                    opportunity_score=round(float(row["opportunity_score"]), 4),
-                    factor_breakdown=breakdown,
-                    risk_event_ids=list(row["risk_event_ids"]),
-                    blocked=bool(row["blocked"]),
-                    block_reasons=list(row["block_reasons"]),
-                    quote_at=row["quote_at"],
-                )
-            )
-        return ScoringResult(
-            candidates=candidates[: self.settings.selection.candidate_limit],
-            eligible_count=len(frame),
-            exclusion_counts=exclusions,
-        )
+        return ScoringResult(candidates, len(features), exclusions)
 
     def score_morning(
         self,
@@ -222,76 +192,14 @@ class ScoringService:
         unprocessed_official_codes: set[str] | None = None,
         exclusion_counts: dict[str, int] | None = None,
     ) -> ScoringResult:
-        frame = features.copy()
-        exclusions = exclusion_counts or {"eligible": len(frame)}
-        if frame.empty:
+        exclusions = exclusion_counts or {"eligible": len(features)}
+        if features.empty:
             return ScoringResult([], 0, exclusions)
-        base = (
-            0.20 * _percentile(frame["ret_1d"])
-            + 0.25 * _percentile(frame["ret_5d"])
-            + 0.15 * _percentile(frame["ret_20d"])
-            + 0.15 * _percentile(frame["close_location"])
-            + 0.15 * _percentile(frame["projected_volume_ratio"])
-            + 0.10 * _percentile(np.log1p(frame["median_amount_20d"]))
+        scored = self.score_model.score_morning(features)
+        candidates = self._build_candidates(
+            run_id,
+            scored,
+            SignalKind.MORNING_WATCHLIST,
+            RiskPolicy(risk_events, unprocessed_official_codes),
         )
-        volatility_penalty = 10.0 * _percentile(frame["volatility_20d"]) / 100.0
-        frame["positive_score"] = base
-        frame["risk_penalty"] = volatility_penalty
-        frame["technical_score"] = np.clip(0.9 * (base - volatility_penalty), 0.0, 90.0)
-
-        events_by_code: dict[str, list[dict[str, object]]] = {}
-        if risk_events is not None and not risk_events.empty:
-            for event in risk_events.to_dict("records"):
-                if event.get("ts_code"):
-                    events_by_code.setdefault(str(event["ts_code"]), []).append(event)
-        unprocessed = unprocessed_official_codes or set()
-        staged: list[dict[str, object]] = []
-        for row in frame.to_dict("records"):
-            code = str(row["ts_code"])
-            related = events_by_code.get(code, [])
-            positives = [event for event in related if str(event.get("direction")) == "positive"]
-            negatives = [event for event in related if str(event.get("direction")) == "negative"]
-            row["news_score"] = min(sum(float(event.get("confidence", 0.0)) * 3.0 for event in positives), 10.0)
-            negative_penalty = min(
-                sum(
-                    {"low": 1.0, "medium": 3.0, "high": 7.0, "critical": 15.0}.get(
-                        str(event.get("severity")), 0.0
-                    )
-                    for event in negatives
-                ),
-                20.0,
-            )
-            reasons = [
-                f"{event.get('event_type')}: {event.get('evidence')}" for event in related if event.get("hard_block")
-            ]
-            if code in unprocessed:
-                reasons.append("存在尚未完成抽取的官方公告")
-            row["opportunity_score"] = float(
-                np.clip(row["technical_score"] + row["news_score"] - negative_penalty, 0.0, 100.0)
-            )
-            row["blocked"] = bool(reasons)
-            row["block_reasons"] = reasons
-            row["risk_event_ids"] = [str(event["event_id"]) for event in related]
-            staged.append(row)
-        staged.sort(key=lambda item: (bool(item["blocked"]), -float(item["opportunity_score"]), str(item["ts_code"])))
-        candidates: list[CandidateScore] = []
-        for rank, row in enumerate(staged, start=1):
-            candidates.append(
-                CandidateScore(
-                    run_id=run_id,
-                    ts_code=str(row["ts_code"]),
-                    name=str(row["name"]),
-                    rank=rank,
-                    opportunity_score=round(float(row["opportunity_score"]), 4),
-                    factor_breakdown=FactorBreakdown.model_validate(
-                        {field: row[field] for field in FactorBreakdown.model_fields if field in row}
-                    ),
-                    risk_event_ids=list(row["risk_event_ids"]),
-                    blocked=bool(row["blocked"]),
-                    block_reasons=list(row["block_reasons"]),
-                    quote_at=row["quote_at"],
-                )
-            )
-        return ScoringResult(
-            candidates[: self.settings.selection.candidate_limit], len(frame), exclusions
-        )
+        return ScoringResult(candidates, len(features), exclusions)

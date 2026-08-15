@@ -20,6 +20,8 @@ from kfcquant.strategy.features import (
     FeatureSchema,
 )
 from kfcquant.strategy.registry import StrategyRegistry
+from kfcquant.strategy.risk import RiskAssessment, RiskPolicy
+from kfcquant.strategy.scoring import ScoreModel
 from kfcquant.strategy.universe import UniversePolicy, UniverseSelection
 
 __all__ = [
@@ -32,6 +34,9 @@ __all__ = [
     "MorningWatchlistStrategy",
     "PRECLOSE_FEATURE_SCHEMA",
     "PrecloseEntryStrategy",
+    "RiskAssessment",
+    "RiskPolicy",
+    "ScoreModel",
     "Strategy",
     "StrategyContext",
     "StrategyIdentity",

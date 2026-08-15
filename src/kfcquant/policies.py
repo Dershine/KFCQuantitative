@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from kfcquant.models import CandidateScore
 
 
 def _time_text(value: time) -> str:
@@ -154,15 +160,66 @@ class SchedulePolicy(BaseModel):
 
 
 class SelectionPolicy(BaseModel):
-    """Shared candidate selection bounds for workflow consumers."""
+    """Single source for ranking, thresholds, and consumer candidate selection."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     top_n: int = Field(default=10, ge=1, le=100)
     candidate_limit: int = Field(default=100, ge=1, le=10_000)
+    minimum_opportunity_score: float = Field(default=0.0, ge=0.0, le=100.0)
 
     @model_validator(mode="after")
     def validate_limits(self) -> SelectionPolicy:
         if self.candidate_limit < self.top_n:
             raise ValueError("candidate_limit must be greater than or equal to top_n")
         return self
+
+    def rank_candidates(self, candidates: list[CandidateScore]) -> list[CandidateScore]:
+        eligible = [
+            candidate
+            for candidate in candidates
+            if candidate.opportunity_score >= self.minimum_opportunity_score
+        ]
+        ordered = sorted(
+            eligible,
+            key=lambda candidate: (
+                candidate.blocked,
+                -candidate.opportunity_score,
+                candidate.ts_code,
+            ),
+        )
+        return [
+            candidate.model_copy(update={"rank": rank})
+            for rank, candidate in enumerate(ordered[: self.candidate_limit], start=1)
+        ]
+
+    def includes(self, rank: int, opportunity_score: float, blocked: bool) -> bool:
+        return (
+            not blocked
+            and rank <= self.top_n
+            and opportunity_score >= self.minimum_opportunity_score
+        )
+
+    def select_candidates(self, candidates: list[CandidateScore]) -> list[CandidateScore]:
+        return sorted(
+            (
+                candidate
+                for candidate in candidates
+                if self.includes(candidate.rank, candidate.opportunity_score, candidate.blocked)
+            ),
+            key=lambda candidate: candidate.rank,
+        )[: self.top_n]
+
+    def select_frame(self, candidates: pd.DataFrame) -> pd.DataFrame:
+        if candidates.empty:
+            return candidates.copy()
+        required = {"rank", "opportunity_score", "blocked"}
+        missing = sorted(required - set(candidates.columns))
+        if missing:
+            raise ValueError(f"candidate frame is missing selection columns: {', '.join(missing)}")
+        selected = candidates[
+            (~candidates["blocked"].astype(bool))
+            & (candidates["rank"] <= self.top_n)
+            & (candidates["opportunity_score"] >= self.minimum_opportunity_score)
+        ]
+        return selected.sort_values("rank").head(self.top_n).copy()
