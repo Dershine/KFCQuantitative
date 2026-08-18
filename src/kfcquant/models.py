@@ -32,6 +32,22 @@ class EventDirection(StrEnum):
     NEGATIVE = "negative"
 
 
+class LLMCallStatus(StrEnum):
+    SUCCESS = "success"
+    FAILED = "failed"
+
+
+class LLMTask(StrEnum):
+    RISK_EXTRACTION = "risk_extraction"
+
+
+class EntityAssociationSource(StrEnum):
+    PROVIDER = "provider"
+    EXACT_TITLE = "exact_title"
+    EXACT_CONTENT = "exact_content"
+    LEGACY = "legacy"
+
+
 class OrderSide(StrEnum):
     BUY = "buy"
     SELL = "sell"
@@ -178,6 +194,51 @@ class IntradayBar(BaseModel):
     source: str
 
 
+class LLMCallTrace(BaseModel):
+    call_id: str = Field(default_factory=lambda: str(uuid4()))
+    task: LLMTask = LLMTask.RISK_EXTRACTION
+    document_id: str
+    provider: str
+    prompt_version: str
+    prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    requested_model: str
+    response_model: str | None = None
+    response_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    started_at: datetime
+    duration_ms: int = Field(ge=0)
+    status: LLMCallStatus
+    error_type: str | None = Field(default=None, max_length=200)
+    error_message: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> Self:
+        if self.started_at.tzinfo is None or self.started_at.utcoffset() is None:
+            raise ValueError("started_at must include timezone")
+        if self.status == LLMCallStatus.SUCCESS:
+            if not self.response_model or not self.response_sha256:
+                raise ValueError("successful LLM call requires response model and hash")
+            if self.error_type or self.error_message:
+                raise ValueError("successful LLM call cannot contain failure metadata")
+        elif not self.error_type:
+            raise ValueError("failed LLM call requires error_type")
+        return self
+
+
+class DocumentEntity(BaseModel):
+    document_id: str
+    ts_code: str
+    relevance: float = Field(ge=0.0, le=1.0)
+    association_source: EntityAssociationSource
+
+
+class RiskEventEntity(BaseModel):
+    event_id: str
+    ts_code: str
+    relevance: float = Field(ge=0.0, le=1.0)
+    association_source: EntityAssociationSource
+
+
 class NewsDocument(BaseModel):
     document_id: str = Field(default_factory=lambda: str(uuid4()))
     ts_code: str | None = None
@@ -191,6 +252,15 @@ class NewsDocument(BaseModel):
     fetched_at: datetime
     processing_status: str = "pending"
     processing_error: str | None = None
+    entities: list[DocumentEntity] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_entities(self) -> Self:
+        if any(entity.document_id != self.document_id for entity in self.entities):
+            raise ValueError("document entities must reference their owning document")
+        if len({entity.ts_code for entity in self.entities}) != len(self.entities):
+            raise ValueError("document entity securities must be unique")
+        return self
 
 
 class RiskEvent(BaseModel):
@@ -207,10 +277,30 @@ class RiskEvent(BaseModel):
     published_at: datetime
     extracted_at: datetime
     model_name: str
+    llm_call_id: str | None = None
+    entities: list[RiskEventEntity] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_entities(self) -> Self:
+        if any(entity.event_id != self.event_id for entity in self.entities):
+            raise ValueError("risk event entities must reference their owning event")
+        if len({entity.ts_code for entity in self.entities}) != len(self.entities):
+            raise ValueError("risk event entity securities must be unique")
+        return self
 
 
 class RiskExtractionResult(BaseModel):
     events: list[RiskEvent] = Field(default_factory=list)
+    trace: LLMCallTrace | None = None
+
+    def __len__(self) -> int:
+        return len(self.events)
+
+    def __iter__(self):
+        return iter(self.events)
+
+    def __getitem__(self, index: int) -> RiskEvent:
+        return self.events[index]
 
 
 class FactorBreakdown(BaseModel):

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from kfcquant.config import SHANGHAI_TZ, Settings
-from kfcquant.db import Database
+from kfcquant.db import MIGRATIONS, Database
 from kfcquant.services.workflow import Workflow
 from tests.conftest import make_daily, make_quotes, make_securities
 from tests.test_workflow import FakeLive, FakeLLM, FakeMarket
@@ -58,4 +58,4 @@ def test_custom_policy_flows_from_schedule_through_run_selection_and_orders(tmp_
     assert run.candidate_count == 3
     assert len(database.get_candidates(run.run_id)) == 3
     assert len(database.proposed_orders(run.run_id)) == 2
-    assert database.migration_version() == 7
+    assert database.migration_version() == len(MIGRATIONS)

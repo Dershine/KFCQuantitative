@@ -6,7 +6,15 @@ from typing import Protocol
 
 import pandas as pd
 
-from kfcquant.models import IntradayBar, NewsDocument, RiskEvent
+from kfcquant.models import IntradayBar, LLMCallTrace, NewsDocument, RiskExtractionResult
+
+
+class LLMCallError(RuntimeError):
+    """An LLM failure carrying safe, persistable call metadata."""
+
+    def __init__(self, trace: LLMCallTrace):
+        super().__init__(trace.error_message or trace.error_type or "LLM call failed")
+        self.trace = trace
 
 
 class MarketDataProvider(Protocol):
@@ -36,6 +44,6 @@ class NewsProvider(Protocol):
 
 
 class LLMProvider(Protocol):
-    def extract_risk_events(self, document: NewsDocument) -> list[RiskEvent]: ...
+    def extract_risk_events(self, document: NewsDocument) -> RiskExtractionResult: ...
 
     def generate_report(self, context: dict[str, object]) -> str: ...

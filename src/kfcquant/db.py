@@ -19,12 +19,18 @@ from kfcquant.models import (
     READABLE_RESEARCH_RUN_STATES,
     CandidateOutcome,
     CandidateScore,
+    DocumentEntity,
+    EntityAssociationSource,
+    LLMCallStatus,
+    LLMCallTrace,
     NewsDocument,
     OpportunityOutcome,
     PaperFill,
     PaperOrder,
     PaperPosition,
     RiskEvent,
+    RiskEventEntity,
+    RiskExtractionResult,
     SignalRun,
     StrategyAttribution,
 )
@@ -358,6 +364,62 @@ MIGRATIONS = (
                manifest_json VARCHAR NOT NULL,
                created_at TIMESTAMPTZ NOT NULL
                )""",
+        ),
+    ),
+    Migration(
+        8,
+        "llm_call_traces",
+        (
+            """CREATE TABLE IF NOT EXISTS llm_call_traces (
+               call_id VARCHAR PRIMARY KEY,
+               task VARCHAR NOT NULL,
+               document_id VARCHAR NOT NULL,
+               provider VARCHAR NOT NULL,
+               prompt_version VARCHAR NOT NULL,
+               prompt_sha256 VARCHAR NOT NULL,
+               input_sha256 VARCHAR NOT NULL,
+               requested_model VARCHAR NOT NULL,
+               response_model VARCHAR,
+               response_sha256 VARCHAR,
+               started_at TIMESTAMPTZ NOT NULL,
+               duration_ms BIGINT NOT NULL,
+               status VARCHAR NOT NULL,
+               error_type VARCHAR,
+               error_message VARCHAR,
+               created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+               )""",
+            """CREATE TABLE IF NOT EXISTS risk_event_llm_calls (
+               event_id VARCHAR PRIMARY KEY,
+               call_id VARCHAR NOT NULL
+               )""",
+        ),
+    ),
+    Migration(
+        9,
+        "multi_entity_intelligence",
+        (
+            """CREATE TABLE IF NOT EXISTS document_entities (
+               document_id VARCHAR NOT NULL,
+               ts_code VARCHAR NOT NULL,
+               relevance DOUBLE NOT NULL,
+               association_source VARCHAR NOT NULL,
+               PRIMARY KEY (document_id, ts_code)
+               )""",
+            """CREATE TABLE IF NOT EXISTS risk_event_entities (
+               event_id VARCHAR NOT NULL,
+               ts_code VARCHAR NOT NULL,
+               relevance DOUBLE NOT NULL,
+               association_source VARCHAR NOT NULL,
+               PRIMARY KEY (event_id, ts_code)
+               )""",
+            """INSERT INTO document_entities (document_id, ts_code, relevance, association_source)
+               SELECT document_id, ts_code, 1.0, 'legacy'
+               FROM news_documents WHERE ts_code IS NOT NULL
+               ON CONFLICT (document_id, ts_code) DO NOTHING""",
+            """INSERT INTO risk_event_entities (event_id, ts_code, relevance, association_source)
+               SELECT event_id, ts_code, 1.0, 'legacy'
+               FROM risk_events WHERE ts_code IS NOT NULL
+               ON CONFLICT (event_id, ts_code) DO NOTHING""",
         ),
     ),
 )
@@ -809,31 +871,77 @@ class Database:
     def save_news_documents(self, documents: list[NewsDocument]) -> int:
         inserted = 0
         with self.connect() as connection:
-            for document in documents:
-                before = connection.execute(
-                    "SELECT count(*) FROM news_documents WHERE content_hash=?", [document.content_hash]
-                ).fetchone()[0]
-                if before:
-                    continue
-                connection.execute(
-                    """INSERT INTO news_documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    [
-                        document.document_id,
-                        document.ts_code,
-                        document.title,
-                        document.content,
-                        document.published_at,
-                        document.source,
-                        document.source_tier.value,
-                        document.url,
-                        document.content_hash,
-                        document.fetched_at,
-                        document.processing_status,
-                        document.processing_error,
-                    ],
-                )
-                inserted += 1
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                for document in documents:
+                    existing = connection.execute(
+                        "SELECT document_id FROM news_documents WHERE content_hash=?", [document.content_hash]
+                    ).fetchone()
+                    if existing:
+                        existing_id = str(existing[0])
+                        remapped = document.model_copy(
+                            update={
+                                "document_id": existing_id,
+                                "entities": [
+                                    entity.model_copy(update={"document_id": existing_id})
+                                    for entity in document.entities
+                                ],
+                            }
+                        )
+                        self._insert_document_entities(connection, remapped)
+                        continue
+                    connection.execute(
+                        """INSERT INTO news_documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        [
+                            document.document_id,
+                            document.ts_code,
+                            document.title,
+                            document.content,
+                            document.published_at,
+                            document.source,
+                            document.source_tier.value,
+                            document.url,
+                            document.content_hash,
+                            document.fetched_at,
+                            document.processing_status,
+                            document.processing_error,
+                        ],
+                    )
+                    self._insert_document_entities(connection, document)
+                    inserted += 1
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
         return inserted
+
+    @staticmethod
+    def _insert_document_entities(
+        connection: duckdb.DuckDBPyConnection,
+        document: NewsDocument,
+    ) -> None:
+        entities = document.entities
+        if not entities and document.ts_code:
+            entities = [
+                DocumentEntity(
+                    document_id=document.document_id,
+                    ts_code=document.ts_code,
+                    relevance=1.0,
+                    association_source=EntityAssociationSource.LEGACY,
+                )
+            ]
+        for entity in entities:
+            connection.execute(
+                """INSERT OR REPLACE INTO document_entities (
+                   document_id, ts_code, relevance, association_source
+                   ) VALUES (?, ?, ?, ?)""",
+                [
+                    entity.document_id,
+                    entity.ts_code,
+                    entity.relevance,
+                    entity.association_source.value,
+                ],
+            )
 
     def pending_news_documents(self, limit: int = 500) -> list[NewsDocument]:
         with self.connect(read_only=True) as connection:
@@ -841,7 +949,34 @@ class Database:
                 "SELECT * FROM news_documents WHERE processing_status='pending' ORDER BY published_at LIMIT ?",
                 [limit],
             ).fetchdf()
-        return [NewsDocument.model_validate(row) for row in frame.to_dict("records")]
+            document_ids = frame["document_id"].astype(str).tolist() if not frame.empty else []
+            entity_frame = (
+                connection.execute(
+                    """SELECT * FROM document_entities
+                       WHERE document_id IN (SELECT unnest(?::VARCHAR[]))
+                       ORDER BY document_id, ts_code""",
+                    [document_ids],
+                ).fetchdf()
+                if document_ids
+                else pd.DataFrame()
+            )
+        entities_by_document: dict[str, list[DocumentEntity]] = {}
+        for row in entity_frame.to_dict("records"):
+            entity = DocumentEntity.model_validate(row)
+            entities_by_document.setdefault(entity.document_id, []).append(entity)
+        return [
+            NewsDocument.model_validate(
+                {**row, "entities": entities_by_document.get(str(row["document_id"]), [])}
+            )
+            for row in frame.to_dict("records")
+        ]
+
+    def document_entities(self, document_id: str) -> pd.DataFrame:
+        with self.connect(read_only=True) as connection:
+            return connection.execute(
+                "SELECT * FROM document_entities WHERE document_id=? ORDER BY ts_code",
+                [document_id],
+            ).fetchdf()
 
     def mark_document(
         self, document_id: str, status: str, error: str | None = None, content: str | None = None
@@ -853,42 +988,226 @@ class Database:
                 [status, error, content, document_id],
             )
 
-    def save_risk_events(self, events: list[RiskEvent]) -> None:
-        with self.connect() as connection:
-            for event in events:
+    @staticmethod
+    def _insert_llm_call_trace(connection: duckdb.DuckDBPyConnection, trace: LLMCallTrace) -> None:
+        connection.execute(
+            """INSERT INTO llm_call_traces (
+               call_id, task, document_id, provider, prompt_version, prompt_sha256,
+               input_sha256, requested_model, response_model, response_sha256,
+               started_at, duration_ms, status, error_type, error_message
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                trace.call_id,
+                trace.task.value,
+                trace.document_id,
+                trace.provider,
+                trace.prompt_version,
+                trace.prompt_sha256,
+                trace.input_sha256,
+                trace.requested_model,
+                trace.response_model,
+                trace.response_sha256,
+                trace.started_at,
+                trace.duration_ms,
+                trace.status.value,
+                trace.error_type,
+                trace.error_message,
+            ],
+        )
+
+    @staticmethod
+    def _insert_risk_events(connection: duckdb.DuckDBPyConnection, events: list[RiskEvent]) -> None:
+        for event in events:
+            connection.execute(
+                "INSERT OR REPLACE INTO risk_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    event.event_id,
+                    event.document_id,
+                    event.ts_code,
+                    event.event_type,
+                    event.direction.value,
+                    event.severity.value,
+                    event.confidence,
+                    event.hard_block,
+                    event.evidence,
+                    event.source_url,
+                    event.published_at,
+                    event.extracted_at,
+                    event.model_name,
+                ],
+            )
+            connection.execute("DELETE FROM risk_event_entities WHERE event_id=?", [event.event_id])
+            if event.llm_call_id:
                 connection.execute(
-                    "INSERT OR REPLACE INTO risk_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO risk_event_llm_calls(event_id, call_id) VALUES (?, ?)",
+                    [event.event_id, event.llm_call_id],
+                )
+            entities = event.entities
+            if not entities and event.ts_code:
+                entities = [
+                    RiskEventEntity(
+                        event_id=event.event_id,
+                        ts_code=event.ts_code,
+                        relevance=1.0,
+                        association_source=EntityAssociationSource.LEGACY,
+                    )
+                ]
+            for entity in entities:
+                connection.execute(
+                    """INSERT OR REPLACE INTO risk_event_entities (
+                       event_id, ts_code, relevance, association_source
+                       ) VALUES (?, ?, ?, ?)""",
                     [
-                        event.event_id,
-                        event.document_id,
-                        event.ts_code,
-                        event.event_type,
-                        event.direction.value,
-                        event.severity.value,
-                        event.confidence,
-                        event.hard_block,
-                        event.evidence,
-                        event.source_url,
-                        event.published_at,
-                        event.extracted_at,
-                        event.model_name,
+                        entity.event_id,
+                        entity.ts_code,
+                        entity.relevance,
+                        entity.association_source.value,
                     ],
                 )
+
+    def save_risk_events(self, events: list[RiskEvent]) -> None:
+        with self.connect() as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                self._insert_risk_events(connection, events)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def complete_risk_extraction(
+        self,
+        document_id: str,
+        result: RiskExtractionResult,
+        *,
+        content: str | None = None,
+    ) -> None:
+        trace = result.trace
+        if trace is None or trace.status != LLMCallStatus.SUCCESS:
+            raise ValueError("successful extraction requires a successful LLM trace")
+        if trace.document_id != document_id:
+            raise ValueError("LLM trace document does not match extraction document")
+        if any(
+            event.document_id != document_id or event.llm_call_id != trace.call_id
+            for event in result.events
+        ):
+            raise ValueError("risk events must reference the extraction document and LLM call")
+        with self.connect() as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                if connection.execute(
+                    "SELECT 1 FROM news_documents WHERE document_id=?", [document_id]
+                ).fetchone() is None:
+                    raise ValueError("extraction document does not exist")
+                self._insert_llm_call_trace(connection, trace)
+                self._insert_risk_events(connection, result.events)
+                connection.execute(
+                    """UPDATE news_documents SET processing_status='processed', processing_error=NULL,
+                       content=coalesce(?, content) WHERE document_id=?""",
+                    [content, document_id],
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def fail_risk_extraction(
+        self,
+        document_id: str,
+        trace: LLMCallTrace,
+        *,
+        content: str | None = None,
+    ) -> None:
+        if trace.status != LLMCallStatus.FAILED or trace.document_id != document_id:
+            raise ValueError("failed extraction requires a matching failed LLM trace")
+        with self.connect() as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                if connection.execute(
+                    "SELECT 1 FROM news_documents WHERE document_id=?", [document_id]
+                ).fetchone() is None:
+                    raise ValueError("extraction document does not exist")
+                self._insert_llm_call_trace(connection, trace)
+                connection.execute(
+                    """UPDATE news_documents SET processing_status='failed', processing_error=?,
+                       content=coalesce(?, content) WHERE document_id=?""",
+                    [trace.error_message, content, document_id],
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def llm_trace_for_risk_event(self, event_id: str) -> dict[str, object] | None:
+        with self.connect(read_only=True) as connection:
+            row = connection.execute(
+                """SELECT t.* FROM llm_call_traces t
+                   JOIN risk_event_llm_calls l ON l.call_id=t.call_id
+                   WHERE l.event_id=?""",
+                [event_id],
+            ).fetchone()
+            if row is None:
+                return None
+            columns = [item[0] for item in connection.description]
+            return dict(zip(columns, row, strict=True))
+
+    def llm_lineage_for_risk_events(self, event_ids: list[str]) -> pd.DataFrame:
+        if not event_ids:
+            return pd.DataFrame(
+                columns=[
+                    "event_id",
+                    "call_id",
+                    "prompt_version",
+                    "prompt_sha256",
+                    "input_sha256",
+                    "requested_model",
+                    "response_model",
+                    "response_sha256",
+                    "status",
+                ]
+            )
+        with self.connect(read_only=True) as connection:
+            return connection.execute(
+                """SELECT l.event_id, t.call_id, t.prompt_version, t.prompt_sha256,
+                          t.input_sha256, t.requested_model, t.response_model,
+                          t.response_sha256, t.status
+                   FROM risk_event_llm_calls l
+                   JOIN llm_call_traces t ON t.call_id=l.call_id
+                   WHERE l.event_id IN (SELECT unnest(?::VARCHAR[]))
+                   ORDER BY l.event_id""",
+                [event_ids],
+            ).fetchdf()
 
     def get_risk_events(self, start: datetime, end: datetime) -> pd.DataFrame:
         with self.connect(read_only=True) as connection:
             return connection.execute(
-                "SELECT * FROM risk_events WHERE published_at BETWEEN ? AND ? ORDER BY published_at DESC",
+                """SELECT r.* EXCLUDE (ts_code), coalesce(e.ts_code, r.ts_code) AS ts_code,
+                          coalesce(e.relevance, 1.0) AS entity_relevance,
+                          coalesce(e.association_source, 'legacy') AS entity_association_source
+                   FROM risk_events r
+                   LEFT JOIN risk_event_entities e ON e.event_id=r.event_id
+                   WHERE r.published_at BETWEEN ? AND ?
+                   ORDER BY r.published_at DESC, r.event_id, ts_code""",
                 [start, end],
             ).fetchdf()
 
     def unprocessed_official_codes(self, start: datetime, as_of: datetime) -> set[str]:
         with self.connect(read_only=True) as connection:
             rows = connection.execute(
-                """SELECT DISTINCT ts_code FROM news_documents
-                   WHERE source_tier='official' AND published_at BETWEEN ? AND ?
-                     AND processing_status<>'processed' AND ts_code IS NOT NULL""",
-                [start, as_of],
+                """SELECT DISTINCT e.ts_code
+                   FROM news_documents d
+                   JOIN document_entities e ON e.document_id=d.document_id
+                   WHERE d.source_tier='official' AND d.published_at BETWEEN ? AND ?
+                     AND d.processing_status<>'processed'
+                   UNION
+                   SELECT DISTINCT d.ts_code
+                   FROM news_documents d
+                   WHERE d.source_tier='official' AND d.published_at BETWEEN ? AND ?
+                     AND d.processing_status<>'processed' AND d.ts_code IS NOT NULL
+                     AND NOT EXISTS (
+                       SELECT 1 FROM document_entities e WHERE e.document_id=d.document_id
+                     )""",
+                [start, as_of, start, as_of],
             ).fetchall()
         return {row[0] for row in rows}
 
@@ -1674,6 +1993,10 @@ class Database:
             "strategy_attributions",
             "ingestion_manifests",
             "run_manifests",
+            "llm_call_traces",
+            "risk_event_llm_calls",
+            "document_entities",
+            "risk_event_entities",
         }
         if name not in allowed:
             raise ValueError(f"table not allowed: {name}")

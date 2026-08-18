@@ -131,7 +131,7 @@ class PointInTimeDataGateway:
             ),
             self.snapshot_store.capture(
                 RunInputKind.RISK_EVENT,
-                "risk-event-v1",
+                "risk-event-v2",
                 "duckdb-normalized-store",
                 risk_frame,
                 **common,

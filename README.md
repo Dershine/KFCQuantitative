@@ -97,6 +97,8 @@ BaoStock按股票读取整个历史区间并分批写入DuckDB和Parquet。首�
 
 每个新Published Signal Run还会通过Point-in-time Data Gateway复核证券、日线、实时报价、风险事件和前序信号的截止时间，并把实际送入Strategy的精确DataFrame保存为`data/raw/run-inputs/`下的内容寻址Parquet；相同内容自动复用。DuckDB的`run_manifests`会原子记录源码SHA及dirty状态、项目/Python/依赖锁版本、Strategy参数、输入快照和上游采集批次、候选结果Hash。截止时间后的数据会使运行失败关闭，不会产生Published Run或模拟买单。
 
+风险资讯抽取还会记录版本化Prompt、Prompt/Input/Response SHA-256、请求与实际模型、耗时和失败类型；调用记录不保存API Key或原文Prompt。文档和风险事件通过显式关系关联一个或多个证券，并保留Provider/确定性名称匹配来源和相关度；旧版单证券记录继续兼容。这样可从Run的风险事件输入快照继续定位到对应LLM抽取版本，失败抽取仍会保持受影响证券不可交易。
+
 ### 4. 启动网页
 
 ```powershell

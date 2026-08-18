@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 
 from kfcquant.db import Database
-from kfcquant.interfaces import LLMProvider, NewsProvider
-from kfcquant.models import NewsDocument
+from kfcquant.interfaces import LLMCallError, LLMProvider, NewsProvider
+from kfcquant.models import (
+    DocumentEntity,
+    EntityAssociationSource,
+    NewsDocument,
+    RiskExtractionResult,
+)
 from kfcquant.providers.document_loader import DocumentLoader
 
 RISK_KEYWORDS = (
@@ -49,6 +55,8 @@ POSITIVE_KEYWORDS = (
     "订单增长",
 )
 
+LOGGER = logging.getLogger(__name__)
+
 
 @dataclass
 class NewsSyncResult:
@@ -76,24 +84,46 @@ class NewsService:
 
     def _map_entities(self, documents: list[NewsDocument]) -> None:
         securities = self.database.get_securities()
-        if securities.empty:
-            return
         names = sorted(
             (
                 (str(row["name"]), str(row["ts_code"]))
                 for row in securities.to_dict("records")
-                if len(str(row["name"])) >= 3
+                if row.get("name") and len(str(row["name"])) >= 3
             ),
             key=lambda item: len(item[0]),
             reverse=True,
         )
         for document in documents:
+            associations = {entity.ts_code: entity for entity in document.entities}
             if document.ts_code:
-                continue
-            text = f"{document.title}\n{document.content or ''}"
-            matched = [code for name, code in names if name in text]
-            if len(set(matched)) == 1:
-                document.ts_code = matched[0]
+                associations[document.ts_code] = DocumentEntity(
+                    document_id=document.document_id,
+                    ts_code=document.ts_code,
+                    relevance=1.0,
+                    association_source=EntityAssociationSource.PROVIDER,
+                )
+            title = document.title
+            content = document.content or ""
+            for name, code in names:
+                if code in associations:
+                    continue
+                if name in title:
+                    associations[code] = DocumentEntity(
+                        document_id=document.document_id,
+                        ts_code=code,
+                        relevance=1.0,
+                        association_source=EntityAssociationSource.EXACT_TITLE,
+                    )
+                elif name in content:
+                    associations[code] = DocumentEntity(
+                        document_id=document.document_id,
+                        ts_code=code,
+                        relevance=0.8,
+                        association_source=EntityAssociationSource.EXACT_CONTENT,
+                    )
+            document.entities = sorted(associations.values(), key=lambda item: item.ts_code)
+            if document.ts_code is None and len(document.entities) == 1:
+                document.ts_code = document.entities[0].ts_code
 
     def sync(self, start: datetime, end: datetime) -> NewsSyncResult:
         official_healthy = True
@@ -142,10 +172,29 @@ class NewsService:
                     document.content = content
                 if self.llm is None:
                     raise RuntimeError("LLM未配置，风险公告不能安全抽取")
-                events = self.llm.extract_risk_events(document)
-                self.database.save_risk_events(events)
-                self.database.mark_document(document.document_id, "processed", content=content)
+                result = self.llm.extract_risk_events(document)
+                if isinstance(result, RiskExtractionResult) and result.trace is not None:
+                    self.database.complete_risk_extraction(document.document_id, result, content=content)
+                    LOGGER.info(
+                        "risk extraction completed document_id=%s llm_call_id=%s events=%s",
+                        document.document_id,
+                        result.trace.call_id,
+                        len(result.events),
+                    )
+                else:
+                    events = result.events if isinstance(result, RiskExtractionResult) else result
+                    self.database.save_risk_events(events)
+                    self.database.mark_document(document.document_id, "processed", content=content)
                 processed += 1
+            except LLMCallError as exc:
+                self.database.fail_risk_extraction(document.document_id, exc.trace, content=document.content)
+                LOGGER.warning(
+                    "risk extraction failed document_id=%s llm_call_id=%s error_type=%s",
+                    document.document_id,
+                    exc.trace.call_id,
+                    exc.trace.error_type,
+                )
+                failed += 1
             except Exception as exc:
                 self.database.mark_document(document.document_id, "failed", error=str(exc)[:1000])
                 failed += 1
