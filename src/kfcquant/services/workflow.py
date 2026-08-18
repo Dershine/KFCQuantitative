@@ -12,6 +12,13 @@ import pandas as pd
 from kfcquant.config import SHANGHAI_TZ, Settings
 from kfcquant.db import Database, JobLeaseLostError
 from kfcquant.interfaces import LiveQuoteProvider, LLMProvider, MarketDataProvider, NewsProvider
+from kfcquant.market_data import (
+    DAILY_BAR_SCHEMA,
+    LIVE_QUOTE_SCHEMA,
+    SECURITY_SCHEMA,
+    TRADE_CALENDAR_SCHEMA,
+    MarketTableSchema,
+)
 from kfcquant.models import ResearchRunState, RunStatus, SignalKind, SignalRun
 from kfcquant.providers.document_loader import DocumentLoader
 from kfcquant.providers.factory import (
@@ -93,6 +100,11 @@ class Workflow:
             return self.llm_provider
         except Exception:
             return None
+
+    @staticmethod
+    def _validated_market_frame(schema: MarketTableSchema, frame: pd.DataFrame) -> pd.DataFrame:
+        """Recheck injected and production providers at the workflow trust boundary."""
+        return schema.validate(frame).frame
 
     def _raw_snapshot(self, provider: str, kind: str, at: datetime | date, frame: pd.DataFrame) -> Path | None:
         if frame.empty:
@@ -232,7 +244,10 @@ class Workflow:
         if online:
             try:
                 today = datetime.now(SHANGHAI_TZ).date()
-                frame = self.market_provider.fetch_trade_calendar(today - timedelta(days=2), today)
+                frame = self._validated_market_frame(
+                    TRADE_CALENDAR_SCHEMA,
+                    self.market_provider.fetch_trade_calendar(today - timedelta(days=2), today),
+                )
                 checks.append(
                     {
                         "check": f"{self.settings.market_provider}-online",
@@ -243,7 +258,7 @@ class Workflow:
             except Exception as exc:
                 checks.append({"check": f"{self.settings.market_provider}-online", "ok": False, "detail": str(exc)})
             try:
-                frame = self.live_provider.fetch_quotes()
+                frame = self._validated_market_frame(LIVE_QUOTE_SCHEMA, self.live_provider.fetch_quotes())
                 checks.append({"check": "akshare-online", "ok": not frame.empty, "detail": f"{len(frame)} quotes"})
             except Exception as exc:
                 checks.append({"check": "akshare-online", "ok": False, "detail": str(exc)})
@@ -275,10 +290,12 @@ class Workflow:
         started = datetime.now(SHANGHAI_TZ)
         job_id = self._job_start("sync-eod", started)
         try:
-            securities = self.market_provider.fetch_securities()
+            securities = self._validated_market_frame(SECURITY_SCHEMA, self.market_provider.fetch_securities())
             self._job_heartbeat(job_id)
             self.database.upsert_securities(securities)
-            calendar = self.market_provider.fetch_trade_calendar(start, end)
+            calendar = self._validated_market_frame(
+                TRADE_CALENDAR_SCHEMA, self.market_provider.fetch_trade_calendar(start, end)
+            )
             self._job_heartbeat(job_id)
             self.database.upsert_trade_calendar(calendar)
             open_dates = [row["cal_date"] for row in calendar.to_dict("records") if bool(row["is_open"])]
@@ -292,13 +309,16 @@ class Workflow:
                     (list_dates <= pd.Timestamp(end)) & (delist_dates.isna() | (delist_dates >= pd.Timestamp(start)))
                 ]
                 for frame in range_loader(start, end, eligible["ts_code"].astype(str).tolist()):
+                    frame = self._validated_market_frame(DAILY_BAR_SCHEMA, frame)
                     self._job_heartbeat(job_id)
                     self.database.upsert_daily_bars(frame)
                     self._raw_range_snapshot(provider_name, "daily", start, end, frame)
                     rows += len(frame)
             else:
                 for trade_date in open_dates:
-                    frame = self.market_provider.fetch_daily(trade_date)
+                    frame = self._validated_market_frame(
+                        DAILY_BAR_SCHEMA, self.market_provider.fetch_daily(trade_date)
+                    )
                     self._job_heartbeat(job_id)
                     self.database.upsert_daily_bars(frame)
                     self._raw_snapshot(provider_name, "daily", trade_date, frame)
@@ -315,8 +335,11 @@ class Workflow:
         started = datetime.now(SHANGHAI_TZ)
         job_id = self._job_start("sync-calendar", started)
         try:
-            frame = self.market_provider.fetch_trade_calendar(
-                at.date() - timedelta(days=10), at.date() + timedelta(days=10)
+            frame = self._validated_market_frame(
+                TRADE_CALENDAR_SCHEMA,
+                self.market_provider.fetch_trade_calendar(
+                    at.date() - timedelta(days=10), at.date() + timedelta(days=10)
+                ),
             )
             self._job_heartbeat(job_id)
             self.database.upsert_trade_calendar(frame)
@@ -405,7 +428,7 @@ class Workflow:
                 mainstream_news_healthy=False,
                 tradable=False,
             ).transition_to(ResearchRunState.COLLECTING_DATA)
-            quotes = self.live_provider.fetch_quotes()
+            quotes = self._validated_market_frame(LIVE_QUOTE_SCHEMA, self.live_provider.fetch_quotes())
             self._job_heartbeat(job_id)
             self.database.insert_live_quotes(quotes)
             self._raw_snapshot("akshare", "quotes", as_of, quotes)
@@ -671,7 +694,7 @@ class Workflow:
             if not run or not bool(run["tradable"]):
                 self._job_finish(job_id, "capture-fill", started, "degraded", "没有可交易的当日信号")
                 return []
-            quotes = self.live_provider.fetch_quotes()
+            quotes = self._validated_market_frame(LIVE_QUOTE_SCHEMA, self.live_provider.fetch_quotes())
             self._job_heartbeat(job_id)
             self.database.insert_live_quotes(quotes)
             self._raw_snapshot("akshare", "quotes", at, quotes)

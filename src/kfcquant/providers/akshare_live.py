@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from kfcquant.config import SHANGHAI_TZ
+from kfcquant.market_data import LIVE_QUOTE_SCHEMA
 from kfcquant.models import IntradayBar
 
 
@@ -45,7 +46,7 @@ class AkShareLiveQuoteProvider:
                 ) from sina_error
         if ts_codes:
             frame = frame[frame["ts_code"].isin(set(ts_codes))]
-        return frame.reset_index(drop=True)
+        return LIVE_QUOTE_SCHEMA.validate(frame.reset_index(drop=True)).frame
 
     @staticmethod
     def _normalize_eastmoney(raw: pd.DataFrame, captured_at: datetime) -> pd.DataFrame:

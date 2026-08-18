@@ -8,6 +8,7 @@ import pandas as pd
 from kfcquant.config import Settings
 from kfcquant.db import Database
 from kfcquant.interfaces import LiveQuoteProvider
+from kfcquant.market_data import LIVE_QUOTE_SCHEMA
 from kfcquant.models import (
     CandidateScore,
     OpportunityOutcome,
@@ -304,7 +305,9 @@ class PortfolioService:
                 elif holding_days >= self.settings.max_holding_days:
                     reason = "max_holding_days"
                 if reason:
-                    quotes = self.live_provider.fetch_quotes([position.ts_code])
+                    quotes = LIVE_QUOTE_SCHEMA.validate(
+                        self.live_provider.fetch_quotes([position.ts_code])
+                    ).frame
                     if not quotes.empty:
                         raw_price = float(quotes.iloc[0]["price"])
                         fills.append(self._close_position(position, raw_price, at, reason))

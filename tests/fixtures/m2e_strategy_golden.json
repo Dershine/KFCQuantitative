@@ -1,6 +1,6 @@
 {
-  "fixture_schema_version": 1,
-  "input_sha256": "14f7f5a04d1c86337cf5eb678c6cc412408bd3c78a2191506bcb6ba31cc083c7",
+  "fixture_schema_version": 2,
+  "input_sha256": "9b804e20405b6e5db652834afb162be6af3584b111d5e93fe1ca826ab29c39db",
   "strategies": {
     "morning_watchlist": {
       "candidates": [

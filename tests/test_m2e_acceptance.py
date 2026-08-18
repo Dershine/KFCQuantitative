@@ -151,7 +151,7 @@ def _evaluate_snapshot(settings: Settings) -> dict[str, Any]:
         )
     )
     return {
-        "fixture_schema_version": 1,
+        "fixture_schema_version": 2,
         "input_sha256": hashlib.sha256(input_json.encode("utf-8")).hexdigest(),
         "strategies": {
             SignalKind.MORNING_WATCHLIST.value: _result_snapshot(morning, morning_result),

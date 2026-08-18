@@ -69,6 +69,7 @@ def make_daily(codes: list[str], end: datetime, days: int = 130) -> pd.DataFrame
                     "up_limit": round((close - 0.01) * 1.1, 2),
                     "down_limit": round((close - 0.01) * 0.9, 2),
                     "suspended": False,
+                    "is_st": False,
                 }
             )
     return pd.DataFrame(rows)

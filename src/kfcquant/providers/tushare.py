@@ -6,6 +6,7 @@ from datetime import date, datetime, time
 import pandas as pd
 
 from kfcquant.config import SHANGHAI_TZ, Settings
+from kfcquant.market_data import DAILY_BAR_SCHEMA, SECURITY_SCHEMA, TRADE_CALENDAR_SCHEMA
 from kfcquant.models import NewsDocument, SourceTier
 
 
@@ -27,32 +28,35 @@ class TushareProvider:
             frame = self.pro.stock_basic(
                 exchange="",
                 list_status=status,
-                fields="ts_code,symbol,name,area,industry,market,exchange,list_status,list_date,delist_date",
+                fields="ts_code,symbol,name,market,exchange,list_status,list_date,delist_date",
             )
             if not frame.empty:
                 frames.append(frame)
         if not frames:
-            return pd.DataFrame()
+            return SECURITY_SCHEMA.empty_frame()
         result = pd.concat(frames, ignore_index=True).drop_duplicates("ts_code", keep="last")
         result["list_date"] = pd.to_datetime(result["list_date"], format="%Y%m%d", errors="coerce").dt.date
         result["delist_date"] = pd.to_datetime(result["delist_date"], format="%Y%m%d", errors="coerce").dt.date
-        return result
+        result["exchange"] = result["ts_code"].astype(str).str.rsplit(".", n=1).str[-1]
+        normalized = result[list(SECURITY_SCHEMA.columns)]
+        return SECURITY_SCHEMA.validate(normalized).frame
 
     def fetch_trade_calendar(self, start: date, end: date) -> pd.DataFrame:
         frame = self.pro.trade_cal(exchange="SSE", start_date=start.strftime("%Y%m%d"), end_date=end.strftime("%Y%m%d"))
         if frame.empty:
-            return frame
+            return TRADE_CALENDAR_SCHEMA.empty_frame()
         frame = frame.rename(columns={"cal_date": "cal_date", "pretrade_date": "pretrade_date"})
         frame["cal_date"] = pd.to_datetime(frame["cal_date"], format="%Y%m%d").dt.date
         frame["pretrade_date"] = pd.to_datetime(frame["pretrade_date"], format="%Y%m%d", errors="coerce").dt.date
-        frame["is_open"] = frame["is_open"].astype(bool)
-        return frame[["cal_date", "is_open", "pretrade_date"]]
+        frame["is_open"] = frame["is_open"].astype(str).eq("1")
+        normalized = frame[["cal_date", "is_open", "pretrade_date"]]
+        return TRADE_CALENDAR_SCHEMA.validate(normalized).frame
 
     def fetch_daily(self, trade_date: date) -> pd.DataFrame:
         day = trade_date.strftime("%Y%m%d")
         daily = self.pro.daily(trade_date=day)
         if daily.empty:
-            return pd.DataFrame()
+            return DAILY_BAR_SCHEMA.empty_frame()
         factor = self.pro.adj_factor(trade_date=day)
         limits = self.pro.stk_limit(trade_date=day)
         result = daily.merge(factor[["ts_code", "adj_factor"]], on="ts_code", how="left")
@@ -61,36 +65,23 @@ class TushareProvider:
         else:
             result["up_limit"] = pd.NA
             result["down_limit"] = pd.NA
-        suspended_codes: set[str] = set()
-        try:
-            suspended = self.pro.suspend_d(suspend_date=day)
-            if not suspended.empty:
-                suspended_codes = set(suspended["ts_code"].dropna().astype(str))
-        except Exception:
-            # Suspension permission is independently controlled by Tushare.
-            pass
+        suspended = self.pro.suspend_d(suspend_type="S", trade_date=day)
+        suspended_codes = (
+            set(suspended["ts_code"].dropna().astype(str)) if not suspended.empty else set()
+        )
+        st_frame = self.pro.stock_st(trade_date=day)
+        st_codes = set(st_frame["ts_code"].dropna().astype(str)) if not st_frame.empty else set()
         result["trade_date"] = trade_date
-        result["volume"] = pd.to_numeric(result["vol"], errors="coerce").fillna(0.0) * 100.0
+        for column in ("open", "high", "low", "close", "pre_close", "up_limit", "down_limit"):
+            result[column] = pd.to_numeric(result[column], errors="coerce")
+        result["volume"] = pd.to_numeric(result["vol"], errors="coerce") * 100.0
         # Tushare daily amount is documented in thousands of CNY.
-        result["amount"] = pd.to_numeric(result["amount"], errors="coerce").fillna(0.0) * 1000.0
-        result["adj_factor"] = pd.to_numeric(result["adj_factor"], errors="coerce").fillna(1.0)
+        result["amount"] = pd.to_numeric(result["amount"], errors="coerce") * 1000.0
+        result["adj_factor"] = pd.to_numeric(result["adj_factor"], errors="coerce")
         result["suspended"] = result["ts_code"].isin(suspended_codes)
-        columns = [
-            "ts_code",
-            "trade_date",
-            "open",
-            "high",
-            "low",
-            "close",
-            "pre_close",
-            "volume",
-            "amount",
-            "adj_factor",
-            "up_limit",
-            "down_limit",
-            "suspended",
-        ]
-        return result[columns]
+        result["is_st"] = result["ts_code"].isin(st_codes)
+        normalized = result[list(DAILY_BAR_SCHEMA.columns)]
+        return DAILY_BAR_SCHEMA.validate(normalized).frame
 
     @staticmethod
     def _hash_document(source: str, url: str | None, title: str, published_at: datetime) -> str:

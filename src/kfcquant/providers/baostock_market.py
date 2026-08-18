@@ -8,6 +8,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from kfcquant.market_data import DAILY_BAR_SCHEMA, SECURITY_SCHEMA, TRADE_CALENDAR_SCHEMA
+
 
 def _to_ts_code(code: str) -> str:
     exchange, symbol = code.lower().split(".", 1)
@@ -74,7 +76,7 @@ class BaoStockMarketDataProvider:
         with self._session() as client:
             raw = self._frame(client.query_stock_basic(), "query_stock_basic")
         if raw.empty:
-            return pd.DataFrame()
+            return SECURITY_SCHEMA.empty_frame()
         frame = raw[raw["type"].astype(str) == "1"].copy()
         frame["ts_code"] = frame["code"].astype(str).map(_to_ts_code)
         frame["symbol"] = frame["ts_code"].str.split(".").str[0]
@@ -85,9 +87,10 @@ class BaoStockMarketDataProvider:
         frame["list_status"] = np.where(frame["status"].astype(str) == "1", "L", "D")
         frame["market"] = np.where(frame["ts_code"].map(_is_main_board), "主板", "其他")
         frame = frame.dropna(subset=["list_date"])
-        return frame[
+        normalized = frame[
             ["ts_code", "symbol", "name", "exchange", "market", "list_date", "delist_date", "list_status"]
         ].reset_index(drop=True)
+        return SECURITY_SCHEMA.validate(normalized).frame
 
     def fetch_trade_calendar(self, start: date, end: date) -> pd.DataFrame:
         expanded_start = start - timedelta(days=31)
@@ -97,7 +100,7 @@ class BaoStockMarketDataProvider:
                 "query_trade_dates",
             )
         if raw.empty:
-            return pd.DataFrame(columns=["cal_date", "is_open", "pretrade_date"])
+            return TRADE_CALENDAR_SCHEMA.empty_frame()
         raw["cal_date"] = pd.to_datetime(raw["calendar_date"], errors="coerce").dt.date
         raw["is_open"] = raw["is_trading_day"].astype(str) == "1"
         previous_open: date | None = None
@@ -109,12 +112,13 @@ class BaoStockMarketDataProvider:
         raw = raw.sort_values("cal_date").copy()
         raw["pretrade_date"] = previous_dates
         raw = raw[(raw["cal_date"] >= start) & (raw["cal_date"] <= end)]
-        return raw[["cal_date", "is_open", "pretrade_date"]].reset_index(drop=True)
+        normalized = raw[["cal_date", "is_open", "pretrade_date"]].reset_index(drop=True)
+        return TRADE_CALENDAR_SCHEMA.validate(normalized).frame
 
     @staticmethod
     def _normalize_daily(raw: pd.DataFrame) -> pd.DataFrame:
         if raw.empty:
-            return pd.DataFrame()
+            return DAILY_BAR_SCHEMA.empty_frame()
         frame = raw.copy()
         frame["ts_code"] = frame["code"].astype(str).map(_to_ts_code)
         frame["trade_date"] = pd.to_datetime(frame["date"], errors="coerce").dt.date
@@ -133,7 +137,7 @@ class BaoStockMarketDataProvider:
         frame["up_limit"] = (frame["preclose"] * (1.0 + limit_rate)).round(2)
         frame["down_limit"] = (frame["preclose"] * (1.0 - limit_rate)).round(2)
         frame["adj_factor"] = 1.0
-        return frame[
+        normalized = frame[
             [
                 "ts_code",
                 "trade_date",
@@ -151,6 +155,7 @@ class BaoStockMarketDataProvider:
                 "is_st",
             ]
         ].rename(columns={"preclose": "pre_close"})
+        return DAILY_BAR_SCHEMA.validate(normalized).frame
 
     def iter_daily_range(
         self,
@@ -184,4 +189,5 @@ class BaoStockMarketDataProvider:
 
     def fetch_daily(self, trade_date: date) -> pd.DataFrame:
         frames = list(self.iter_daily_range(trade_date, trade_date))
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        combined = pd.concat(frames, ignore_index=True) if frames else DAILY_BAR_SCHEMA.empty_frame()
+        return DAILY_BAR_SCHEMA.validate(combined).frame
