@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -12,6 +12,7 @@ import duckdb
 import pandas as pd
 from filelock import FileLock
 
+from kfcquant.experiments import ExperimentRecord
 from kfcquant.ingestion import IngestionManifest, MarketDatasetKind
 from kfcquant.market_data import DAILY_BAR_SCHEMA, LIVE_QUOTE_SCHEMA, SECURITY_SCHEMA, TRADE_CALENDAR_SCHEMA
 from kfcquant.migrations import Migration, MigrationRunner
@@ -422,6 +423,27 @@ MIGRATIONS = (
                ON CONFLICT (event_id, ts_code) DO NOTHING""",
         ),
     ),
+    Migration(
+        10,
+        "strategy_experiments",
+        (
+            """CREATE TABLE IF NOT EXISTS experiments (
+               experiment_id VARCHAR PRIMARY KEY,
+               experiment_version VARCHAR NOT NULL,
+               dataset_id VARCHAR NOT NULL,
+               baseline_strategy_id VARCHAR NOT NULL,
+               baseline_strategy_version VARCHAR NOT NULL,
+               baseline_parameter_hash VARCHAR NOT NULL,
+               candidate_strategy_id VARCHAR NOT NULL,
+               candidate_strategy_version VARCHAR NOT NULL,
+               candidate_parameter_hash VARCHAR NOT NULL,
+               conclusion VARCHAR NOT NULL,
+               record_sha256 VARCHAR NOT NULL UNIQUE,
+               record_json VARCHAR NOT NULL,
+               created_at TIMESTAMPTZ NOT NULL
+               )""",
+        ),
+    ),
 )
 
 
@@ -817,6 +839,67 @@ class Database:
                 return None
             result = dict(zip([item[0] for item in connection.description], row, strict=True))
         result["manifest"] = ResearchRunManifest.model_validate_json(result["manifest_json"])
+        return result
+
+    def save_experiment(
+        self,
+        record: ExperimentRecord,
+        event_hook: Callable[[str], None] | None = None,
+    ) -> None:
+        """Persist one immutable experiment atomically; identical retries are idempotent."""
+        validated = ExperimentRecord.model_validate_json(record.canonical_json)
+        with self.connect() as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                existing = connection.execute(
+                    "SELECT record_sha256, record_json FROM experiments WHERE experiment_id=?",
+                    [validated.experiment_id],
+                ).fetchone()
+                expected = (validated.record_sha256, validated.canonical_json)
+                if existing is not None:
+                    if tuple(existing) != expected:
+                        raise ValueError(f"experiment record is immutable: {validated.experiment_id}")
+                else:
+                    connection.execute(
+                        """INSERT INTO experiments (
+                           experiment_id, experiment_version, dataset_id,
+                           baseline_strategy_id, baseline_strategy_version, baseline_parameter_hash,
+                           candidate_strategy_id, candidate_strategy_version, candidate_parameter_hash,
+                           conclusion, record_sha256, record_json, created_at
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        [
+                            validated.experiment_id,
+                            validated.experiment_version,
+                            validated.dataset.dataset_id,
+                            validated.baseline.strategy_id,
+                            validated.baseline.strategy_version,
+                            validated.baseline.parameter_hash,
+                            validated.candidate.strategy_id,
+                            validated.candidate.strategy_version,
+                            validated.candidate.parameter_hash,
+                            validated.conclusion.value,
+                            validated.record_sha256,
+                            validated.canonical_json,
+                            validated.created_at,
+                        ],
+                    )
+                if event_hook is not None:
+                    event_hook("before_commit")
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def get_experiment(self, experiment_id: str) -> dict[str, Any] | None:
+        with self.connect(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM experiments WHERE experiment_id=?",
+                [experiment_id],
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(zip([item[0] for item in connection.description], row, strict=True))
+        result["record"] = ExperimentRecord.model_validate_json(result["record_json"])
         return result
 
     def get_securities(self) -> pd.DataFrame:
@@ -1997,6 +2080,7 @@ class Database:
             "risk_event_llm_calls",
             "document_entities",
             "risk_event_entities",
+            "experiments",
         }
         if name not in allowed:
             raise ValueError(f"table not allowed: {name}")

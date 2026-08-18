@@ -114,6 +114,25 @@ def test_empty_database_initialization_and_repeat_are_idempotent(tmp_path):
     expected_entity_columns = {"ts_code", "relevance", "association_source"}
     assert {"document_id", *expected_entity_columns} <= document_entity_columns
     assert {"event_id", *expected_entity_columns} <= risk_entity_columns
+    with duckdb.connect(str(path), read_only=True) as connection:
+        experiment_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info('experiments')").fetchall()
+        }
+    assert {
+        "experiment_id",
+        "experiment_version",
+        "dataset_id",
+        "baseline_strategy_id",
+        "baseline_strategy_version",
+        "baseline_parameter_hash",
+        "candidate_strategy_id",
+        "candidate_strategy_version",
+        "candidate_parameter_hash",
+        "conclusion",
+        "record_sha256",
+        "record_json",
+        "created_at",
+    } <= experiment_columns
 
 
 def test_existing_signal_schema_is_migrated_in_place(tmp_path):
@@ -279,6 +298,35 @@ def test_run_manifest_migration_failure_rolls_back_table_and_recovers(tmp_path):
         assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == len(MIGRATIONS)
         assert connection.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_name='run_manifests'"
+        ).fetchone()
+
+
+def test_experiment_migration_upgrades_v9_and_recovers_from_midway_failure(tmp_path):
+    path = tmp_path / "experiment-migration-failure.duckdb"
+    experiment_migration = next(migration for migration in MIGRATIONS if migration.version == 10)
+    with duckdb.connect(str(path)) as connection:
+        runner = MigrationRunner(connection)
+        runner.apply(MIGRATIONS[:9])
+        broken = (
+            *MIGRATIONS[:9],
+            Migration(
+                10,
+                "broken_strategy_experiments",
+                (*experiment_migration.statements, "BAD SQL"),
+            ),
+        )
+        with pytest.raises(duckdb.Error):
+            runner.apply(broken)
+        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 9
+        assert not connection.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name='experiments'"
+        ).fetchone()
+
+        runner.apply(MIGRATIONS)
+        runner.apply(MIGRATIONS)
+        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == len(MIGRATIONS)
+        assert connection.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name='experiments'"
         ).fetchone()
 
 

@@ -164,12 +164,45 @@ class HistoricalSimulationRejection:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalEquityPoint:
+    """One close-of-session mark with explicit completeness for metric safety."""
+
+    session: date
+    cash: float
+    market_value: float | None
+    total_equity: float | None
+    marked_positions: int
+    open_positions: int
+    complete: bool
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.cash) or self.cash < 0:
+            raise HistoricalSimulationViolation("historical equity cash must be finite and non-negative")
+        if self.marked_positions < 0 or self.open_positions < 0 or self.marked_positions > self.open_positions:
+            raise HistoricalSimulationViolation("historical equity position counts are inconsistent")
+        if self.complete:
+            if self.marked_positions != self.open_positions:
+                raise HistoricalSimulationViolation("complete historical equity must mark every open position")
+            if self.market_value is None or self.total_equity is None:
+                raise HistoricalSimulationViolation("complete historical equity requires market and total values")
+            if not math.isfinite(self.market_value) or self.market_value < 0:
+                raise HistoricalSimulationViolation("historical market value must be finite and non-negative")
+            if not math.isfinite(self.total_equity) or self.total_equity < 0:
+                raise HistoricalSimulationViolation("historical total equity must be finite and non-negative")
+            if not math.isclose(self.total_equity, self.cash + self.market_value, rel_tol=0.0, abs_tol=1e-8):
+                raise HistoricalSimulationViolation("historical total equity is inconsistent")
+        elif self.market_value is not None or self.total_equity is not None:
+            raise HistoricalSimulationViolation("incomplete historical equity cannot publish partial valuation")
+
+
+@dataclass(frozen=True, slots=True)
 class HistoricalSimulationResult:
     initial_cash: float
     ending_cash: float
     fills: tuple[HistoricalSimulationFill, ...]
     positions: tuple[HistoricalSimulationPosition, ...]
     rejections: tuple[HistoricalSimulationRejection, ...]
+    equity_curve: tuple[HistoricalEquityPoint, ...]
 
     @property
     def open_positions(self) -> tuple[HistoricalSimulationPosition, ...]:
@@ -401,6 +434,7 @@ class HistoricalExecutionSimulator:
         positions: dict[str, HistoricalSimulationPosition] = {}
         fills: list[HistoricalSimulationFill] = []
         rejections: list[HistoricalSimulationRejection] = []
+        equity_curve: list[HistoricalEquityPoint] = []
         self._emit(event_hook, "after_input_validation")
 
         for session_index, session in enumerate(normalized_sessions):
@@ -508,6 +542,26 @@ class HistoricalExecutionSimulator:
                     fills.append(fill)
                     positions[position.position_id] = position
 
+            open_positions = tuple(position for position in positions.values() if position.is_open)
+            marked_values = [
+                bar_map[(session, position.ts_code)].close * position.shares
+                for position in open_positions
+                if (session, position.ts_code) in bar_map
+            ]
+            complete = len(marked_values) == len(open_positions)
+            market_value = sum(marked_values) if complete else None
+            equity_curve.append(
+                HistoricalEquityPoint(
+                    session=session,
+                    cash=cash,
+                    market_value=market_value,
+                    total_equity=cash + market_value if market_value is not None else None,
+                    marked_positions=len(marked_values),
+                    open_positions=len(open_positions),
+                    complete=complete,
+                )
+            )
+
         expected_cash = self.config.initial_cash + sum(fill.total_cash_change for fill in fills)
         if not math.isclose(cash, expected_cash, rel_tol=0.0, abs_tol=1e-8) or cash < -1e-8:
             raise HistoricalSimulationViolation("historical cash ledger is inconsistent")
@@ -517,6 +571,7 @@ class HistoricalExecutionSimulator:
             fills=tuple(fills),
             positions=tuple(sorted(positions.values(), key=lambda item: (item.opened_at, item.ts_code))),
             rejections=tuple(rejections),
+            equity_curve=tuple(equity_curve),
         )
         self._emit(event_hook, "before_result_publish")
         return result

@@ -10,7 +10,7 @@
 | 首次建立 | 2026-08-15 |
 | 最近复核 | 2026-08-18 |
 | 项目版本基线 | `0.2.0` |
-| 源码基线 | `704dd0762eb1ae3cefa22c4b581bd0219e3a17f9`（工作区有未提交M4-A/M4-B/M4-C改动） |
+| 源码基线 | `eb5801d9c5b3a7842f4e9194ae71aade67dfea65`（工作区有未提交M4-D改动） |
 | 适用范围 | Research Service、Operations Manager、数据与部署基础设施 |
 | 目标读者 | 项目维护者、策略开发者、代码审查者、部署维护者 |
 | 领域语言 | 以根目录 `CONTEXT.md` 为准 |
@@ -101,7 +101,7 @@ KFCQuant 当前是一个面向个人使用、强调可审计和安全降级的 A
 | 严格可复现性 | 较高 | Published Run已有完整版本清单、精确输入快照、Hash和上游批次引用；风险事件可继续定位Prompt与LLM调用版本 |
 | 故障恢复 | 高 | Signal发布已整体原子化；Job具备续租、竞争隔离、过期回收和迟到写入隔离 |
 | 可观测性 | 中等 | 有Job、心跳和健康状态，缺少结构化指标与告警 |
-| 回放与实验 | 中高 | 已有Replay Clock、Manifest只读数据网关、实时/Replay共核执行器及隔离的历史成交Simulator，尚无Experiment记录和评估闭环 |
+| 回放与实验 | 高 | Replay、实时共核和隔离历史Simulator已形成闭环；Experiment以同一内容寻址数据集比较基线/候选，记录声明的验收标准、指标、数据质量、结论和可复算Hash |
 
 最重要的长期演进支点是：
 
@@ -191,7 +191,7 @@ flowchart LR
 | Intelligence | `services/news.py`、`providers/qwen.py` | 文档、实体、事件、证据和风险抽取 | Document、RiskEvent |
 | Strategy | `strategy/*`、`services/scoring.py` | 策略身份、输入契约、注册组装、股票池、特征、评分、风险门禁、候选选择 | StrategyContext、StrategyResult |
 | Portfolio | `services/portfolio.py`、`db.py` | 订单、成交、现金、仓位、退出策略 | PaperOrder、PaperFill、PaperPosition |
-| Evaluation | `services/evaluation.py` | 信号效果和组合效果评估 | CandidateOutcome、OpportunityOutcome |
+| Evaluation | `services/evaluation.py`、`experiments.py` | 信号、组合、数据质量指标与可审计Strategy实验 | CandidateOutcome、OpportunityOutcome、ExperimentRecord |
 | Research Run | `services/workflow.py` | 编排一次原子、可恢复、可追踪的运行 | Run Manifest、Signal Run |
 | Presentation | `cli.py`、`dashboard.py`、reports | 人机交互与只读展示 | CLI、Web、Markdown Report |
 | Operations | `kfcops/*`、`deploy/*` | 发布、回滚、健康和运维审计 | Release、Deployment、Runtime State |
@@ -215,6 +215,7 @@ KFCQuantitative/
 │   ├── clock.py                   System/Replay Clock应用时间端口
 │   ├── replay.py                  Manifest输入的只读Replay Data Gateway
 │   ├── historical_simulator.py    与实时影子账户隔离的确定性历史成交Simulator
+│   ├── experiments.py              不可变实验记录、标准比较与信号/组合/数据质量指标
 │   ├── interfaces.py             Provider Protocol
 │   ├── policies.py               类型化调度、窗口和候选选择Policy
 │   ├── migrations.py             有序、事务化DuckDB迁移Runner
@@ -355,7 +356,7 @@ flowchart TD
 | 资讯与风险 | `news_documents`、`document_entities`、`risk_events`、`risk_event_entities`、`llm_call_traces`、`risk_event_llm_calls` |
 | 信号 | `signal_runs`、`candidate_scores` |
 | 影子组合 | `paper_account`、`paper_orders`、`paper_fills`、`paper_positions` |
-| 评估 | `candidate_outcomes`、`opportunity_outcomes` |
+| 评估与实验 | `candidate_outcomes`、`opportunity_outcomes`、`experiments` |
 | 运行与报告 | `job_runs`、`job_leases`、`reports`、`schema_migrations` |
 
 当前存储特点：
@@ -377,6 +378,7 @@ flowchart TD
 - Schema v9以`document_entities`和`risk_event_entities`表达多证券归属、0–1相关度和关联来源；Provider显式代码优先，其次使用证券全名的标题/正文确定性匹配。既有单一`ts_code`记录幂等回填legacy关系，旧writer仍可写入并由查询回退兼容。
 - Workflow及Point-in-time用例通过可注入Clock取得时间；生产默认使用上海时区SystemClock，Replay使用拒绝无时区值的固定ReplayClock。Replay Data Gateway只从Run Manifest引用的内容寻址Parquet读取，逐项验证路径、Hash、行数、Schema、cutoff和数据时间边界后重建正式StrategyContext，不访问Provider、数据库或订单路径；DuckDB/Parquet往返产生的Timestamp会按声明Schema恢复为date，非法原值仍被拒绝。
 - Morning、Pre-close与Replay统一通过`StrategyExecutionRunner`解析并执行正式Strategy，输出同一候选Hash。`ReplayRunner`在执行前核对Manifest的Strategy Identity和参数快照，执行后核对结果Hash；身份、参数或结果漂移均失败关闭，且重放不写数据库、订单、Job或新快照。
+- Schema v10以不可变`experiments`记录同一内容寻址Dataset上的基线/候选Strategy Identity、参数、结果Hash、声明的验收标准、逐项判定与结论；相同记录幂等，冲突改写拒绝。指标层固定计算分层收益、MFE/MAE、总回报、最大回撤、换手、候选/权益可评估率与拒单质量计数，缺失估值不发布部分回报或回撤。
 
 ### 4.6 部署拓扑
 
@@ -399,8 +401,9 @@ flowchart TD
 | 检查 | 结果 |
 |---|---|
 | Ruff | 通过 |
-| Pytest | 272项通过 |
-| 总覆盖率 | 83%（Research Service，含分支）；Research与Operations合并80% |
+| Pytest | 293项通过 |
+| 总覆盖率 | 84%（Research Service，含分支） |
+| `experiments.py` | 100%（含分支） |
 | `historical_simulator.py` | 96%（含分支） |
 | `run_manifest.py` | 100%（含分支） |
 | `point_in_time.py` | 98%（含分支） |
@@ -445,6 +448,7 @@ flowchart TD
 - System/Replay Clock时区契约与Workflow默认时点注入；Morning/Pre-close Manifest只读重建正式StrategyContext，快照缺失、篡改、合法Hash但不可读、行数/Schema/cutoff错配、未来输入、畸形代码集合、缺列、时钟漂移和意外输入种类均失败关闭。
 - Morning/Pre-close实时Workflow与Replay共用同一Strategy执行器；实际DuckDB→Parquet Manifest往返结果Hash一致且重放无业务写入。Strategy Identity、参数Hash、候选run_id或结果Hash漂移均失败关闭；五类截止后输入在快照/执行前被拒绝，后续源数据扰动不改变既有Manifest结果。
 - 历史Simulator只消费类型化Signal/Candidate、Daily Bar与显式交易日序列，不依赖Provider、DuckDB或实时影子账户；费用、最低佣金、印花税、滑点、整手、仓位、T+1、最大持有期和不可成交门禁均由不可变配置给出。买卖成本与实时`FeeModel`逐字段一致，Morning、blocked及`tradable=false`无买单，停牌/无成交/涨停买/跌停卖失败关闭，同Bar止损优先、现金守恒、确定性重跑和提交前故障不发布部分结果均有离线证据。
+- Experiment Dataset对输入快照Hash、市场数据Hash和严格递增交易日生成稳定身份；两臂完整Strategy Identity和结果Hash、类型化标准、逐项判定、自动结论与记录Hash可复算。分层收益、MFE/MAE、回撤、换手、可评估率、拒单计数及缺失权益估值失败关闭均有离线证据；Schema v10空库、v9升级、重复迁移、中途失败恢复、记录幂等/冲突和事务回滚通过。
 
 尚未形成强保护的区域：
 
@@ -681,7 +685,7 @@ flowchart LR
 | M1 | 保证核心状态正确且可恢复 | Signal发布原子化、Job可回收、配置收口、迁移可验证 | `DONE` |
 | M2 | 建立可插拔策略内核 | Strategy契约、策略注册、版本化参数和归属贯穿核心模型 | `DONE` |
 | M3 | 建立严格数据与模型血缘 | Run Manifest、数据Schema、快照引用、Prompt追踪可查询 | `DONE` |
-| M4 | 建立实时/历史共核的Replay与实验体系 | 固定快照重放结果一致，可比较基线和候选策略 | `IN_PROGRESS` |
+| M4 | 建立实时/历史共核的Replay与实验体系 | 固定快照重放结果一致，可比较基线和候选策略 | `DONE` |
 | M5 | 降低长期维护和运营成本 | 用例与Repository边界明确，结构化观测和质量门禁完善 | `NOT_STARTED` |
 | M6 | 强化发布并基于证据决定扩展 | 原子Release、恢复演练通过，数据库扩展有量化门槛 | `NOT_STARTED` |
 
@@ -791,19 +795,21 @@ M3完成条件已满足：全部30点工作包均为`DONE`；任一新Run可从M
 | M4-02 | Replay数据读取器 | 5 | 基于Manifest/快照的Data Gateway | 严格只返回截止时间前的数据 | `DONE` |
 | M4-03 | 共核Replay Runner | 5 | 复用正式Strategy的重放入口 | 同一快照实时路径与Replay路径输出Hash一致 | `DONE` |
 | M4-04 | 历史成交模拟器 | 5 | 与实时影子成交分离的Simulator | 费用、滑点、T+1和不可成交规则显式配置 | `DONE` |
-| M4-05 | Experiment模型 | 5 | 假设、基线、候选、数据集、标准、结论 | 策略变更有可审计实验记录 | `NOT_STARTED` |
-| M4-06 | 评估指标体系 | 5 | 信号、组合和数据质量指标 | 包含分层收益、MFE/MAE、回撤、换手和可评估率 | `NOT_STARTED` |
+| M4-05 | Experiment模型 | 5 | 假设、基线、候选、数据集、标准、结论 | 策略变更有可审计实验记录 | `DONE` |
+| M4-06 | 评估指标体系 | 5 | 信号、组合和数据质量指标 | 包含分层收益、MFE/MAE、回撤、换手和可评估率 | `DONE` |
 | M4-07 | 防未来函数测试 | 3 | 时间扰动和属性测试 | 添加截止时间后数据不会改变既有Run结果 | `DONE` |
 
 M4总点数：`30`。完成条件：候选策略必须能与基线策略在同一不可变数据集上比较。
 
-M4进度：`20 / 30 = 66.7%`。
+M4进度：`30 / 30 = 100%`。完成条件已满足：基线与候选Strategy可在同一不可变Dataset上比较，实验假设、标准、指标、数据质量、结论和记录Hash均可审计、可复算。
 
 - M4-01证据：新增应用层`Clock` Protocol、上海时区`SystemClock`和固定`ReplayClock`；无时区Replay时点被拒绝。Workflow全部业务用例、Job心跳、采集清单、Run Manifest及Point-in-time快照捕获统一消费注入Clock，显式传入的`as_of/at`仍保持优先；源码扫描确认Strategy、Services和Point-in-time边界不再直接调用`datetime.now()`。
 - M4-02证据：`ReplayDataGateway`只消费已验证Run Manifest及内容寻址输入快照，读取前验证安全路径、文件存在性、SHA-256、Parquet可读性、行数、输入种类、Schema版本和Manifest cutoff；四类市场/风险时间边界复用正式Point-in-time守卫，Morning与Pre-close均可重建同一正式`StrategyContext`字段。Gateway不接收Database或Provider，不写新快照；未来数据及所有完整性/契约异常失败关闭。
 - M4-03证据：新增`StrategyExecutionRunner`作为Workflow与Replay共用的唯一Strategy执行内核，统一产生候选Hash并拒绝跨Run候选；`ReplayRunner`以Manifest的Strategy ID、版本、规范化参数快照/Hash约束Registry实现，并在执行后校验结果Hash。Morning与Pre-close实际Workflow发布的DuckDB→Parquet Manifest均可重放出相同Hash，且Signal Run、Candidate、Order和Job行数不变；身份与结果漂移在执行前/后分别失败关闭。
 - M4-07证据：参数化时间扰动覆盖未来上市证券、当日日线、cutoff后Quote、Risk Event和Previous Signal，均在快照或Strategy执行前失败且不留下输入目录；既有两时段Manifest在后续源数据增加未来记录后结果逐字段及Hash保持不变。阶段专项33项通过，Replay与共核执行器含分支覆盖率100%。
 - M4-04证据：新增纯内存`HistoricalExecutionSimulator`，通过不可变显式配置与类型化Signal/Candidate、Daily Bar和交易日序列模拟独立历史现金、持仓、成交与拒单，不接触Provider、DuckDB、实时影子账户或订单表。23项专项覆盖买卖费用/滑点与实时`FeeModel`等价、T+1、同Bar止损优先、最大持有交易日、blocked/`tradable=false`/Morning无买单、停牌/无成交/涨停买/跌停卖、整手与资金不足、现金守恒、稳定ID确定性重跑、输入契约及买卖/结果发布故障恢复；模块含分支覆盖率96%。
+- M4-05证据：新增冻结的`ExperimentDataset`、基线/候选`ExperimentArm`、类型化`ExperimentCriterion`与内容寻址`ExperimentRecord`；Dataset绑定输入快照、市场数据和交易日Hash，记录包含两臂完整Strategy Identity/参数/源码/结果Hash、假设、逐项判定、自动结论与规范化记录Hash。Schema v10追加`experiments`表，相同保存幂等、冲突改写拒绝，提交前故障完整回滚；空库、v9升级、重复迁移、中途失败与恢复通过。
+- M4-06证据：`ExperimentMetricsCalculator`固定计算低/中/高分层收益、平均收益、MFE/MAE、总回报、最大回撤、单边成交额换手、候选与权益曲线可评估率和拒单原因计数；历史Simulator逐交易日发布带完整性标记的权益点，缺失持仓估值时不产生部分总回报或回撤，依赖该指标的实验标准失败关闭。真实研究数据库只读副本演练使用47,877条日线、3,192个完整代码及6个交易日，对同一Dataset比较两组各5只候选，候选/权益可评估率均100%，记录Hash回读一致；临时副本已删除且源库SHA-256保持`b7a3818c1e2b991bd8ee97a0aa523ca96e824861f8a68d8381133cca81e973fe`。
 
 ### M5：模块化、可观测性与质量门禁
 
@@ -845,14 +851,14 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 | M1 正确性、原子性与恢复 | 22 | 22 | 100% | `DONE` | 2026-08-15完成M1-C；93项测试、Ruff、Job崩溃/竞争恢复、原子Upsert、迁移兼容和pip check通过 |
 | M2 策略内核与多策略基础 | 32 | 32 | 100% | `DONE` | 2026-08-18完成M2-E；140项测试、Golden防漂移、Strategy 100%覆盖率及真实数据副本两时段演练通过 |
 | M3 数据契约、血缘与LLM治理 | 30 | 30 | 100% | `DONE` | 2026-08-18完成M3-D；216项测试、风险抽取Trace、多实体门禁、Run→LLM血缘闭环及真实旧库副本v9升级通过 |
-| M4 Replay与策略实验 | 20 | 30 | 66.7% | `IN_PROGRESS` | 2026-08-18完成M4-C；272项测试、历史Simulator 96%覆盖、费用/滑点/T+1/不可成交/现金与故障恢复通过 |
+| M4 Replay与策略实验 | 30 | 30 | 100% | `DONE` | 2026-08-18完成M4-D；293项测试、Experiment 100%/Simulator 96%覆盖，同Dataset比较、指标、Schema v10恢复及真实数据副本演练通过 |
 | M5 模块化、可观测性与质量门禁 | 0 | 32 | 0% | `NOT_STARTED` | — |
 | M6 发布强化与规模决策 | 0 | 18 | 0% | `NOT_STARTED` | — |
-| **总体** | **108** | **168** | **64.3%** | `IN_PROGRESS` | M0至M3完成、M4-A/M4-B/M4-C完成；下一阶段M4-D |
+| **总体** | **118** | **168** | **70.2%** | `IN_PROGRESS` | M0至M4完成；下一阶段M5-A |
 
 ### 12.1 当前建议的下一工程阶段
 
-工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M1、M2和M3已经完成，M4-A、M4-B与M4-C也已完成。当前建议下一阶段为M4-D“实验记录与评估闭环”，按M4-05 → M4-06完成共10点：让基线与候选策略在同一不可变数据集上比较，并记录假设、数据集、指标、数据质量、结论与可复算证据；不在该阶段提前拆分Workflow/Database或接入新Provider。
+工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M1至M4已经完成。当前建议下一阶段为M5-A“应用与持久化边界”，按M5-01 → M5-02完成共10点：先以行为测试保护现有Workflow用例与事务语义，再让服务只获得最小Repository能力；不在该阶段提前引入Composition Root、Dashboard Query Model或结构化可观测性。
 
 | 阶段ID | 阶段名称 | 工作包 | 点数 | 依赖 | 状态 | 阶段验收目标 |
 |---|---|---|---:|---|---|---|
@@ -871,7 +877,7 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 | M4-A | Replay时钟与数据读取底座 | M4-01、M4-02 | 7 | M3 | `DONE` | System/Replay Clock边界明确；Replay Gateway只从Manifest快照读取截止时间内数据，并保持正式Strategy输入契约 |
 | M4-B | 共核Replay与防未来函数 | M4-03、M4-07 | 8 | M4-A | `DONE` | Replay复用正式Strategy执行内核；同一快照实时/Replay输出Hash一致；截止时间后的数据扰动不改变既有结果 |
 | M4-C | 历史成交模拟 | M4-04 | 5 | M4-B | `DONE` | 历史Simulator与实时影子成交隔离；费用、滑点、T+1、不可成交、现金和失败回滚可配置且可验证 |
-| M4-D | 实验记录与评估闭环 | M4-05、M4-06 | 10 | M4-C | `NOT_STARTED` | 基线与候选策略在同一不可变数据集上比较；假设、指标、数据质量和结论可追溯且可复算 |
+| M4-D | 实验记录与评估闭环 | M4-05、M4-06 | 10 | M4-C | `DONE` | 基线与候选策略在同一不可变数据集上比较；假设、指标、数据质量和结论可追溯且可复算 |
 | M5-A | 应用与持久化边界 | M5-01、M5-02 | 10 | M4 | `NOT_STARTED` | Workflow拆为职责单一的应用用例；服务仅依赖最小Repository能力，并保持现有运行语义与事务边界 |
 | M5-B | 依赖组装与查询模型 | M5-03、M5-06 | 6 | M5-A | `NOT_STARTED` | Composition Root集中组装依赖；Dashboard只消费稳定只读查询模型，不自行拼接领域表语义 |
 | M5-C | 结构化可观测性 | M5-04、M5-05 | 8 | M5-B | `NOT_STARTED` | Job、Run、Strategy、Provider和阶段可通过关联ID串联；关键运行、数据、锁、LLM和组合异常可度量并告警 |
@@ -908,6 +914,8 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 `M4-B`已完成，阶段验收证据为：M4-03让Morning、Pre-close与Replay统一通过`StrategyExecutionRunner`执行正式Strategy并产生候选Hash，Replay在执行前核对Manifest Strategy Identity/参数、执行后核对结果Hash，身份、参数、跨Run候选或结果漂移均失败关闭；真实Workflow发布的两时段DuckDB→Parquet Manifest均可只读重放出相同Hash，且没有新增Run、Candidate、Order或Job。M4-07以五类截止后输入扰动证明未来Security、Daily Bar、Quote、Risk Event和Previous Signal在快照/Strategy前失败关闭，后续源数据增加未来记录不改变既有Manifest结果。实现同时修复DuckDB/Parquet日期往返的逻辑类型重建，非法日期仍由版本化Schema拒绝。Ruff全仓、249项全量测试和pip check通过；Research/合并含分支覆盖率82%/79%，Replay、Run Manifest、共核执行器和Strategy包100%，阶段专项33项及原子发布/组合/时间门禁专项68项通过。无Schema、迁移、依赖、订单、成交、现金、调度、Provider、部署、README或领域语言变化；TD-009完成。当前建议下一阶段为`M4-C`，只完成M4-04历史成交模拟，不提前实施Experiment。
 
 `M4-C`已完成，阶段验收证据为：M4-04新增与实时影子成交严格隔离的纯内存`HistoricalExecutionSimulator`，只消费类型化Signal/Candidate、Daily Bar和显式交易日序列，不读取Provider或DuckDB，也不写Signal、Order、Fill、Position或现金表。不可变配置显式绑定期初现金、仓位、整手、佣金、最低佣金、印花税、滑点、T+1、止盈止损、最大持有交易日和不可成交门禁；买卖成本逐字段对齐实时`FeeModel`。多日离线贯穿证明Morning、blocked及`tradable=false`不买入，停牌/无成交/涨停买/跌停卖失败关闭，同Bar止损优先、T+1、最大持有期、非负现金与账本守恒成立；稳定ID保证相同输入结果一致，买卖提交前与结果发布前故障均不产生可见部分结果且可安全重跑。Ruff全仓、272项全量测试和pip check通过；Research/合并含分支覆盖率83%/80%，Simulator 96%，23项阶段专项和86项Replay/原子发布/策略归属/实时组合安全回归通过。无Schema、迁移、依赖、实时订单/成交/现金语义、调度、Provider、部署、README或领域语言变化；现有技术债状态不变。当前建议下一阶段为`M4-D`，顺序为M4-05 → M4-06，不提前拆分Workflow或Database。
+
+`M4-D`已完成，阶段验收证据为：M4-05以不可变Dataset、两臂完整Strategy Identity、类型化标准、自动判定和规范化Hash形成可审计Experiment Record；Schema v10持久化幂等且拒绝冲突改写，提交前故障不留下部分记录。M4-06统一计算分层收益、MFE/MAE、总回报、最大回撤、换手、候选/权益可评估率与拒单质量计数，缺失权益估值显式不可评估且不会发布部分指标。真实研究数据库只复制到临时文件，47,877条日线中3,192个代码满足完整窗口，同一内容寻址Dataset上的两组各5只候选完成比较，两个可评估率均100%、记录Hash回读一致、Schema升至v10；临时副本已删除，源库SHA-256未变化。Ruff、293项全量测试和pip check通过；Research含分支覆盖率84%，Experiment 100%、Simulator 96%，43项阶段专项以及迁移、Replay、原子发布、策略归属和组合安全回归通过。无依赖、实时运行、订单/成交/现金、调度、Provider、部署、README或领域语言变化；现有技术债状态不变。当前建议下一阶段为`M5-A`，顺序为M5-01 → M5-02，不提前实施Composition Root、Dashboard Query Model或可观测性。
 
 ### 12.2 阶段级Goal执行规则
 
@@ -1155,6 +1163,7 @@ worker_heartbeat_age_seconds
 | 2026-08-18 | `704dd0762eb1`（工作区） | 完成M4-A：应用Clock边界与Manifest只读Replay Data Gateway | M4-01/02完成；M4为7/30点；总体95/168点；TD-009转IN_PROGRESS；下一阶段M4-B | Ruff、232项全量测试、Research/合并覆盖率81%/78%、阶段专项33项/99%、Replay/Clock/Manifest 100%、完整性与未来输入故障场景及pip check通过 |
 | 2026-08-18 | `704dd0762eb1`（工作区） | 完成M4-B：实时/Replay共核执行、结果Hash一致与防未来函数扰动证据 | M4-03/07、TD-009完成；M4为15/30点；总体103/168点；下一阶段M4-C | Ruff、249项全量测试、Research/合并覆盖率82%/79%、阶段专项33项、Replay/Manifest/共核执行器100%、68项安全专项和pip check通过 |
 | 2026-08-18 | `704dd0762eb1`（工作区） | 完成M4-C：与实时影子账户隔离的确定性历史成交Simulator | M4-04完成；M4为20/30点；总体108/168点；技术债状态不变；下一阶段M4-D | Ruff、272项全量测试、Research/合并覆盖率83%/80%、Simulator 96%、23项阶段专项、86项安全回归和pip check通过；T+1、费用、滑点、不可成交、现金守恒及故障恢复验证通过 |
+| 2026-08-18 | `eb5801d9c5b3`（工作区） | 完成M4-D：不可变Experiment记录、Schema v10与信号/组合/数据质量指标闭环 | M4-05/06完成；M4为30/30点并完成；总体118/168点；技术债状态不变；下一阶段M5-A | Ruff、293项全量测试、Research含分支覆盖84%、Experiment 100%、Simulator 96%、43项阶段专项、Schema v10五类场景、事务恢复、同Dataset比较、真实数据副本演练和pip check通过 |
 
 ---
 
@@ -1171,4 +1180,4 @@ KFCQuant当前不是混乱的脚本集合，而是边界意识较强、具备运
 5. M5降低模块耦合并建立主动观测；
 6. M6在真实指标证明需要时强化发布和扩展基础设施。
 
-M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3同样完成，市场与Run输入具备不可变快照和时间边界，风险事件还能继续定位Prompt、模型和输入Hash，多实体资讯不会再被压缩成单一`ts_code`。M4-A已建立Replay Clock与Manifest只读数据网关，M4-B让实时与Replay共享正式Strategy执行内核，并以Identity、结果Hash和五类时间扰动证明一致性与防未来函数边界；M4-C又补齐了与实时影子账户隔离、费用和交易约束明确的历史成交Simulator。下一步由M4-D建立Experiment记录与评估指标闭环；完成后M4才具备可审计的完整实验闭环。
+M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3同样完成，市场与Run输入具备不可变快照和时间边界，风险事件还能继续定位Prompt、模型和输入Hash，多实体资讯不会再被压缩成单一`ts_code`。M4也已完成：Replay Clock、Manifest只读网关、实时/Replay共核、隔离历史Simulator和不可变Experiment/指标记录共同形成可审计实验闭环。下一步由M5-A在行为和事务边界保持不变的前提下拆分Workflow应用用例与最小Repository能力，开始降低长期维护耦合。

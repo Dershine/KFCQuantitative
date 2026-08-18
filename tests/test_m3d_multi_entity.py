@@ -181,7 +181,7 @@ def test_multi_entity_migration_rolls_back_and_recovers(tmp_path):
         ).fetchone()
 
         runner.apply(MIGRATIONS)
-        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 9
+        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == len(MIGRATIONS)
         assert connection.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_name='risk_event_entities'"
         ).fetchone()
