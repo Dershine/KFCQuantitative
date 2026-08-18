@@ -10,6 +10,8 @@ from kfcquant.models import IntradayBar, NewsDocument, RiskEvent
 
 
 class MarketDataProvider(Protocol):
+    source_name: str
+
     def fetch_securities(self) -> pd.DataFrame: ...
 
     def fetch_trade_calendar(self, start: date, end: date) -> pd.DataFrame: ...
@@ -18,6 +20,8 @@ class MarketDataProvider(Protocol):
 
 
 class LiveQuoteProvider(Protocol):
+    source_name: str
+
     def fetch_quotes(self, ts_codes: Sequence[str] | None = None) -> pd.DataFrame: ...
 
     def fetch_intraday_bars(

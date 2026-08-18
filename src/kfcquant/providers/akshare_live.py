@@ -36,10 +36,12 @@ class AkShareLiveQuoteProvider:
         try:
             raw = self.client.stock_zh_a_spot_em()
             frame = self._normalize_eastmoney(raw, captured_at)
+            self.source_name = "akshare-eastmoney"
         except Exception as eastmoney_error:
             try:
                 raw = self.client.stock_zh_a_spot()
                 frame = self._normalize_sina(raw, captured_at)
+                self.source_name = "akshare-sina"
             except Exception as sina_error:
                 raise RuntimeError(
                     f"all AKShare quote sources failed; Eastmoney: {eastmoney_error}; Sina: {sina_error}"

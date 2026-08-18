@@ -10,7 +10,7 @@
 | 首次建立 | 2026-08-15 |
 | 最近复核 | 2026-08-18 |
 | 项目版本基线 | `0.2.0` |
-| 源码基线 | `dfb83e550b9b95e5b1f0fcbdb7d4058503b81d5e`（工作区有未提交M3-A改动） |
+| 源码基线 | `c6fc34797f19d11a939c9013fb5531fce8d75eb7`（工作区有未提交M3-B改动） |
 | 适用范围 | Research Service、Operations Manager、数据与部署基础设施 |
 | 目标读者 | 项目维护者、策略开发者、代码审查者、部署维护者 |
 | 领域语言 | 以根目录 `CONTEXT.md` 为准 |
@@ -98,7 +98,7 @@ KFCQuant 当前是一个面向个人使用、强调可审计和安全降级的 A
 | 部署与回滚 | 较高 | 具备CI验证、备份、健康检查和自动回滚 |
 | 单策略可维护性 | 中高 | 股票池、特征、技术评分、资讯风险和选择Policy已分离并独立测试 |
 | 多策略演进 | 较高 | Strategy契约、Registry、归属、参数身份与Golden Snapshot回归基线已建立 |
-| 严格可复现性 | 偏低 | 缺少完整Run Manifest、数据版本和Prompt版本 |
+| 严格可复现性 | 中低 | 规范化市场批次已有不可变快照、Hash和Provider清单；仍缺完整Run Manifest与Prompt版本 |
 | 故障恢复 | 高 | Signal发布已整体原子化；Job具备续租、竞争隔离、过期回收和迟到写入隔离 |
 | 可观测性 | 中等 | 有Job、心跳和健康状态，缺少结构化指标与告警 |
 | 回放与实验 | 偏低 | 有前向评估，尚无共享策略内核的历史Replay |
@@ -346,6 +346,7 @@ flowchart TD
 |---|---|
 | 市场主数据 | `securities`、`trade_calendar` |
 | 行情 | `daily_bars`、`live_quotes` |
+| 数据血缘 | `ingestion_manifests` |
 | 资讯与风险 | `news_documents`、`risk_events` |
 | 信号 | `signal_runs`、`candidate_scores` |
 | 影子组合 | `paper_account`、`paper_orders`、`paper_fills`、`paper_positions` |
@@ -361,6 +362,7 @@ flowchart TD
 - 买卖成交已使用显式数据库事务；
 - Signal Run具有类型化生命周期，业务查询只消费明确可读终态；
 - Signal Run、Candidates、Orders和Job完成状态由Research Run UoW统一事务发布。
+- Security、Trade Calendar、Daily Bar和Live Quote的每个新持久化批次先生成不可覆盖Parquet快照，再把业务行与`ingestion_manifests`置于同一DuckDB事务；清单记录实际Provider、采集时间、Schema、文件SHA-256、行数、质量报告与Job关联，空批次同样可审计。
 - Job租约独立存放于`job_leases`，保持旧版八列`job_runs`写入兼容；有效租约阻止同名竞争与部署，过期任务可在Scheduler启动时幂等回收。
 - Morning与Pre-close通过统一Strategy契约和Registry解析；现有`strategy_version_*`配置由内置Strategy Identity承接，持久化Schema保持不变；两者共享独立`UniversePolicy`并分别消费版本化`FeatureSchema`，股票池与特征层不接收新闻、风险或排序输入。
 - `ScoreModel`只接收版本化特征并产生确定性技术分；`RiskPolicy`独立解释资讯软调整与证据硬阻断，`SelectionPolicy`统一最低分、blocked优先级、稳定排序、候选上限和Top N消费语义；`ScoringService`保留为兼容编排门面。
@@ -387,17 +389,18 @@ flowchart TD
 | 检查 | 结果 |
 |---|---|
 | Ruff | 通过 |
-| Pytest | 140项通过 |
-| 总覆盖率 | 74%（含分支） |
+| Pytest | 178项通过 |
+| 总覆盖率 | 79%（Research Service，含分支） |
+| `ingestion.py` | 99%（含分支） |
 | `strategy_identity.py` | 100%（含分支） |
 | `strategy/*` | 100%语句与分支覆盖 |
 | `services/scoring.py` | 95%（含分支） |
 | `policies.py` | 89%（含分支；本阶段Selection分支已覆盖） |
-| `db.py` | 87%（含分支） |
+| `db.py` | 88%（含分支） |
 | `unit_of_work.py` | 100% |
 | `models.py` | 97%（含分支） |
 | `services/portfolio.py` | 74%（含分支） |
-| `services/workflow.py` | 59%（含分支） |
+| `services/workflow.py` | 63%（含分支） |
 | CLI、Scheduler、Dashboard | CLI与Dashboard 0%；Scheduler 91%（含分支） |
 
 已有测试重点覆盖：
@@ -420,6 +423,7 @@ flowchart TD
 - Strategy Identity/Context/Result/Protocol、Registry重复/缺项拒绝、两时段Registry注入和版本来源；Morning无买单与blocked Candidate无买单贯穿回归。
 - 确定性技术评分与资讯调整隔离、证据硬阻断、无证据LLM事件不硬阻断；最低分、稳定排序、候选上限与Top N贯穿Workflow、Portfolio、Evaluation、Dashboard和报告。
 - 固定输入指纹、Morning/Pre-close Strategy Identity、参数Hash、完整候选分数/因子/风险字段与Golden基线一致；同一输入重复求值一致，非预期策略漂移直接使CI失败。
+- 四类市场批次的不可变Parquet、实际Provider、文件Hash、行数和质量报告可查询；空批次、重复采集、快照篡改/缺失、混合Provider、业务写入与清单原子回滚及恢复均有离线测试。
 
 尚未形成强保护的区域：
 
@@ -655,7 +659,7 @@ flowchart LR
 | M0 | 固化当前事实和路线治理 | 技术基线、风险台账、路线和验收规则进入仓库 | `DONE` |
 | M1 | 保证核心状态正确且可恢复 | Signal发布原子化、Job可回收、配置收口、迁移可验证 | `DONE` |
 | M2 | 建立可插拔策略内核 | Strategy契约、策略注册、版本化参数和归属贯穿核心模型 | `DONE` |
-| M3 | 建立严格数据与模型血缘 | Run Manifest、数据Schema、快照引用、Prompt追踪可查询 | `NOT_STARTED` |
+| M3 | 建立严格数据与模型血缘 | Run Manifest、数据Schema、快照引用、Prompt追踪可查询 | `IN_PROGRESS` |
 | M4 | 建立实时/历史共核的Replay与实验体系 | 固定快照重放结果一致，可比较基线和候选策略 | `NOT_STARTED` |
 | M5 | 降低长期维护和运营成本 | 用例与Repository边界明确，结构化观测和质量门禁完善 | `NOT_STARTED` |
 | M6 | 强化发布并基于证据决定扩展 | 原子Release、恢复演练通过，数据库扩展有量化门槛 | `NOT_STARTED` |
@@ -736,19 +740,21 @@ M2完成条件已满足：全部32点工作包均为`DONE`；两套内置Strateg
 |---|---|---:|---|---|---|
 | M3-01 | 表级数据Schema | 5 | Security、Calendar、DailyBar、Quote Schema | 列、类型、时区、单位、唯一键和数值关系可验证 | `DONE` |
 | M3-02 | Provider契约测试套件 | 3 | 所有Provider共享的contract tests | 新Provider必须通过同一规范化契约 | `DONE` |
-| M3-03 | Ingestion Manifest | 5 | Provider、采集时间、Hash、行数、质量报告 | 任一规范化批次可追溯到原始输入 | `NOT_STARTED` |
+| M3-03 | Ingestion Manifest | 5 | Provider、采集时间、Hash、行数、质量报告 | 任一规范化批次可追溯到原始输入 | `DONE` |
 | M3-04 | Run Manifest | 5 | 运行清单模型与持久化 | 任一Published Run包含全部必要版本与快照引用 | `NOT_STARTED` |
 | M3-05 | 时间边界守卫 | 3 | Point-in-time Data Gateway | 截止时间后的数据无法进入StrategyContext | `NOT_STARTED` |
-| M3-06 | Provider身份去硬编码 | 1 | 快照使用实际Provider元数据 | 切换Live Provider后血缘名称正确 | `NOT_STARTED` |
+| M3-06 | Provider身份去硬编码 | 1 | 快照使用实际Provider元数据 | 切换Live Provider后血缘名称正确 | `DONE` |
 | M3-07 | LLM调用追踪 | 3 | Prompt版本、Hash、模型、耗时、失败信息 | 风险事件可追溯到抽取配置和输入Hash | `NOT_STARTED` |
 | M3-08 | 多实体资讯模型 | 5 | DocumentEntity、RiskEventEntity关系 | 一篇文档可关联多证券且保留相关度 | `NOT_STARTED` |
 
 M3总点数：`30`。完成条件：选取任一历史Run，可定位其所有策略、数据和LLM输入版本。
 
-M3进度：`8 / 30 = 26.7%`。
+M3进度：`14 / 30 = 46.7%`。
 
 - M3-01证据：`security-v1`、`trade-calendar-v1`、`daily-bar-v1`和`live-quote-v1`以同一可执行Schema定义精确列、逻辑类型、空值、时区、单位、唯一键、有限数值、价格范围及跨字段关系；空结果规范化为稳定列集合，异常结构、类型、键和关系均失败关闭。Schema专项语句/分支覆盖率100%。
 - M3-02证据：BaoStock、Tushare和AKShare Market/Live适配器均在返回前执行对应Schema，Workflow对生产或注入Provider在写库、原始快照和订单规划前再次复核；共享离线契约覆盖正常、空结果、单位换算、价格限制缺失、复权/成交量缺失、权限失败和真实停牌零行情。Tushare交易日`"0"`不再误判为开市，历史停牌与ST状态接口不可用时不再吞错或默认可交易；失败原因进入Job失败记录。现有只读快照5,542条报价和33个日线文件共851,382行通过新契约，原文件和研究数据库均未修改。
+- M3-03证据：新增类型化`IngestionManifest`与Schema v6 `ingestion_manifests`；Security、Trade Calendar、Daily Bar和Live Quote的新持久化批次均生成UUID命名、不可覆盖的Parquet，记录相对路径、实际Provider、带时区采集时间、Schema版本、文件SHA-256、行数、列/唯一键/单位/空值质量报告和Job关联。空批次仍产生可验证快照；重复持久化同一Manifest幂等，冲突Manifest被拒绝；快照缺失或篡改可检测。业务行与Manifest在同一DuckDB事务写入，Manifest故障注入证明业务数据完整回滚，保留的不可变快照可用于安全重试恢复。Schema v6空库、旧库升级、重复初始化、中途失败与恢复以及旧业务表writer兼容通过。
+- M3-06证据：Market/Live Provider Protocol显式要求`source_name`，BaoStock与Tushare提供稳定身份；Live Quote有数据时以批次唯一`source`作为实际来源，混合来源失败关闭。AKShare在Eastmoney与Sina路径成功后动态记录真实来源，因此Sina回退的空批次也不会误标为Eastmoney；Pre-close与Fill不再硬编码`akshare`目录。Fake Provider切换离线端到端产生两个不同来源清单并均可按Hash验证。
 
 ### M4：Replay与策略实验
 
@@ -803,15 +809,15 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 | M0 架构基线与治理 | 4 | 4 | 100% | `DONE` | 2026-08-15建立本文档并验证现有测试 |
 | M1 正确性、原子性与恢复 | 22 | 22 | 100% | `DONE` | 2026-08-15完成M1-C；93项测试、Ruff、Job崩溃/竞争恢复、原子Upsert、迁移兼容和pip check通过 |
 | M2 策略内核与多策略基础 | 32 | 32 | 100% | `DONE` | 2026-08-18完成M2-E；140项测试、Golden防漂移、Strategy 100%覆盖率及真实数据副本两时段演练通过 |
-| M3 数据契约、血缘与LLM治理 | 8 | 30 | 26.7% | `IN_PROGRESS` | 2026-08-18完成M3-A；171项测试、Schema 100%覆盖、共享Provider契约、Workflow双重边界与真实快照兼容验证通过 |
+| M3 数据契约、血缘与LLM治理 | 14 | 30 | 46.7% | `IN_PROGRESS` | 2026-08-18完成M3-B；178项测试、Ingestion 99%覆盖、四类批次清单、原子回滚恢复与Provider切换验证通过 |
 | M4 Replay与策略实验 | 0 | 30 | 0% | `NOT_STARTED` | — |
 | M5 模块化、可观测性与质量门禁 | 0 | 32 | 0% | `NOT_STARTED` | — |
 | M6 发布强化与规模决策 | 0 | 18 | 0% | `NOT_STARTED` | — |
-| **总体** | **66** | **168** | **39.3%** | `IN_PROGRESS` | M0、M1、M2及M3-A完成；下一阶段M3-B |
+| **总体** | **72** | **168** | **42.9%** | `IN_PROGRESS` | M0、M1、M2及M3-A/M3-B完成；下一阶段M3-C |
 
 ### 12.1 当前建议的下一工程阶段
 
-工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M1、M2与M3-A已经完成；当前建议下一阶段为M3-B“采集清单与Provider身份”，按依赖顺序完成M3-03 → M3-06，共6点：先让任一规范化批次记录Provider、采集时间、Hash、行数和质量报告，再消除原始快照中的Provider身份硬编码；不在该阶段提前引入Run Manifest、时间边界守卫、LLM追踪或多实体资讯。
+工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M1、M2、M3-A与M3-B已经完成；当前建议下一阶段为M3-C“Run清单与时间边界”，按依赖顺序完成M3-04 → M3-05，共8点：先让Published Run原子关联代码、策略、参数和本阶段建立的数据快照，再以Point-in-time Data Gateway阻止截止时间后的数据进入StrategyContext；不在该阶段提前实施LLM追踪、多实体资讯或Replay。
 
 | 阶段ID | 阶段名称 | 工作包 | 点数 | 依赖 | 状态 | 阶段验收目标 |
 |---|---|---|---:|---|---|---|
@@ -824,7 +830,8 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 | M2-D | 策略归属与参数身份 | M2-07、M2-08 | 8 | M2-C | `DONE` | Run、Order、Position和Outcome可追溯到Strategy Identity；规范化参数快照具有稳定Hash且变更自动产生新Hash |
 | M2-E | Golden Snapshot回归基线 | M2-09 | 3 | M2-D | `DONE` | 固定输入、Identity与参数快照产生稳定候选/分数；非预期策略漂移会使CI失败 |
 | M3-A | 数据边界契约 | M3-01、M3-02 | 8 | M2 | `DONE` | 四类核心市场数据在进入领域逻辑前校验列、类型、时区、单位、唯一键和数值关系；所有Provider共享同一离线契约套件 |
-| M3-B | 采集清单与Provider身份 | M3-03、M3-06 | 6 | M3-A | `NOT_STARTED` | 任一规范化批次可定位原始输入、实际Provider、采集时间、Hash、行数与质量报告；切换Provider后血缘名称不漂移 |
+| M3-B | 采集清单与Provider身份 | M3-03、M3-06 | 6 | M3-A | `DONE` | 任一规范化批次可定位原始输入、实际Provider、采集时间、Hash、行数与质量报告；切换Provider后血缘名称不漂移 |
+| M3-C | Run清单与时间边界 | M3-04、M3-05 | 8 | M3-B | `NOT_STARTED` | Published Run原子关联完整版本与数据快照；截止时间后的数据无法进入StrategyContext |
 
 `M1-A`已完成，阶段验收证据为：非默认Schedule/Selection从注册计划贯穿Pre-close运行与订单选择；空库、旧库、重复迁移、失败回滚与恢复通过；Ruff、60项全量测试、66%总覆盖率、pip check和PowerShell语法检查通过。
 
@@ -843,6 +850,8 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 `M2-E`已完成，阶段验收证据为：固定输入通过SHA-256指纹锁定，Golden文件同时锁定两时段Strategy Identity、完整参数快照/Hash、候选排序、机会分、全部因子、风险事件、证据阻断和排除统计；重复求值一致，改变候选、分数、参数或安全字段会使CI显式失败。真实研究数据库仅复制到临时文件离线读取，5,545只证券、479,140条日线和5,542条报价通过两套正式Strategy内核得到1,723/1,700个合格对象与各100个候选，临时副本随后删除，原库未修改。Ruff、140项全量测试、Research 74%含分支覆盖率、Research与Operations合并71%、M2专项47项/99%含分支覆盖率、Strategy包与Identity 100%、27项原子发布/恢复/组合安全专项和pip check均通过。无生产代码、Schema、迁移、依赖、Provider、部署、README或领域语言变化；TD-006仍为`IN_PROGRESS`，源码SHA继续由M3 Run Manifest处理。当前建议下一阶段为`M3-A`，顺序为M3-01 → M3-02。
 
 `M3-A`已完成，阶段验收证据为：四类核心市场数据具备版本化可执行Schema，BaoStock、Tushare和AKShare共享离线契约并在适配器出口校验，Workflow在写库、快照和订单规划前独立复核，非法EOD或Quote批次在产生业务写入前失败且留下失败Job证据。Tushare单位、交易日布尔、历史停牌/ST与缺失复权/成交量均有故障场景；既有Golden输入Schema显式升至v2，仅输入Hash因新增`is_st=false`字段变化，两时段策略结果逐字段保持一致。现有5,542条Quote和851,382条DailyBar只读快照通过兼容校验，原始数据和本地研究数据库未修改。Ruff、171项全量测试、Research与Operations合并74%含分支覆盖率、M3专项31项与Schema语句/分支覆盖率100%、28项原子恢复/组合安全专项及pip check通过。无DuckDB Schema、迁移、依赖或部署变化；README已补充Tushare权限与失败关闭要求，CONTEXT领域语言未变化；TD-008完成。当前建议下一阶段为`M3-B`，顺序为M3-03 → M3-06，不提前实施Run Manifest或时间边界守卫。
+
+`M3-B`已完成，阶段验收证据为：M3-03让四类持久化市场批次具有不可覆盖Parquet、UUID批次ID、实际Provider、带时区采集时间、Schema版本、文件SHA-256、行数、质量报告和Job关联；空批次可审计，重复写入幂等，篡改/缺失可检测，业务行与清单事务失败完整回滚且可用保留快照恢复。M3-06消除Pre-close/Fill的`akshare`硬编码，以批次实际`source`优先并动态标记AKShare Eastmoney/Sina回退，混合来源失败关闭。离线EOD贯穿产生Security、Calendar和Daily三类清单，Pre-close→Fill Provider切换产生两份来源准确的Quote清单；Schema v6空库、旧库、重复迁移、中途失败与恢复及旧writer兼容通过。迁移不为M3-B之前缺少完整采集上下文的旧快照伪造清单，旧文件保持可读且不被改写；启动旧Release仍应按既有部署流程同时恢复部署前数据库备份。Ruff、178项全量测试、Research Service 79%含分支覆盖率、`ingestion.py` 99%、`market_data.py` 100%、36项原子发布/组合安全专项与pip check通过。无依赖、策略、组合、调度或部署变化；README记录新审计行为，CONTEXT领域语言未变化；TD-007仍为`NOT_STARTED`，完整Run Manifest留待M3-C。当前建议下一阶段为`M3-C`，顺序为M3-04 → M3-05。
 
 ### 12.2 阶段级Goal执行规则
 
@@ -1083,6 +1092,7 @@ worker_heartbeat_age_seconds
 | 2026-08-18 | `80bbc91678dd`（工作区） | 完成M2-D：策略归属贯穿、规范化参数快照与稳定Hash、Schema v5归属旁表 | M2-07/08完成；M2为29/32点；总体55/168点；下一阶段M2-E；TD-006转IN_PROGRESS，源码SHA留待M3 | Ruff通过；139项测试通过；含分支总覆盖率74%；参数身份、Strategy包与UoW均100%；归属端到端、Schema五类场景、安全门禁、组合一致性和pip check通过 |
 | 2026-08-18 | `d82b7584bf22`（工作区） | 完成M2-E：固定输入指纹与两时段Strategy Golden Snapshot回归基线 | M2-09完成；M2为32/32点并完成；总体58/168点；下一阶段M3-A；TD-006保持IN_PROGRESS | Ruff、140项测试和pip check通过；Research含分支覆盖率74%、合并覆盖率71%、M2专项99%；真实数据副本两时段演练、原子恢复与组合安全回归通过 |
 | 2026-08-18 | `dfb83e550b9b`（工作区） | 完成M3-A：四类市场数据Schema、共享Provider契约、Workflow双重边界与Tushare安全状态修正 | M3-01/02、TD-008完成；M3为8/30点；总体66/168点；下一阶段M3-B | Ruff、171项全量测试、合并74%含分支覆盖、M3专项31项/Schema 100%、28项安全专项和pip check通过；既有Quote/Daily快照兼容通过 |
+| 2026-08-18 | `c6fc34797f19`（工作区） | 完成M3-B：四类Ingestion Manifest、不可变快照、事务写入与实际Provider身份 | M3-03/06完成；M3为14/30点；总体72/168点；下一阶段M3-C；TD-007保持NOT_STARTED | Ruff、178项全量测试、Research含分支覆盖率79%、Ingestion 99%；Schema v6五类场景、EOD/Pre-close/Fill贯穿、Hash篡改、Provider切换、原子回滚恢复、36项安全专项和pip check通过 |
 
 ---
 
@@ -1099,4 +1109,4 @@ KFCQuant当前不是混乱的脚本集合，而是边界意识较强、具备运
 5. M5降低模块耦合并建立主动观测；
 6. M6在真实指标证明需要时强化发布和扩展基础设施。
 
-M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3-A进一步把核心市场数据从约定式DataFrame收紧为可执行边界契约。下一步以M3-B建立规范化批次的Ingestion Manifest和真实Provider身份，再向Run Manifest与时间边界守卫推进；在M3完成前仍不宜大规模并行增加Provider或策略。完成M4后，系统才具备完整实验闭环。
+M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3-A把核心市场数据从约定式DataFrame收紧为可执行边界契约，M3-B进一步让每个新持久化批次拥有不可变快照、可查询质量清单和真实Provider身份。下一步以M3-C把这些批次引用原子纳入Run Manifest并建立时间边界守卫；在M3完成前仍不宜大规模并行增加Provider或策略。完成M4后，系统才具备完整实验闭环。

@@ -12,6 +12,8 @@ import duckdb
 import pandas as pd
 from filelock import FileLock
 
+from kfcquant.ingestion import IngestionManifest, MarketDatasetKind
+from kfcquant.market_data import DAILY_BAR_SCHEMA, LIVE_QUOTE_SCHEMA, SECURITY_SCHEMA, TRADE_CALENDAR_SCHEMA
 from kfcquant.migrations import Migration, MigrationRunner
 from kfcquant.models import (
     READABLE_RESEARCH_RUN_STATES,
@@ -314,6 +316,25 @@ MIGRATIONS = (
                )""",
         ),
     ),
+    Migration(
+        6,
+        "ingestion_manifests",
+        (
+            """CREATE TABLE IF NOT EXISTS ingestion_manifests (
+               batch_id VARCHAR PRIMARY KEY,
+               dataset_kind VARCHAR NOT NULL,
+               schema_version VARCHAR NOT NULL,
+               provider VARCHAR NOT NULL,
+               collected_at TIMESTAMPTZ NOT NULL,
+               snapshot_path VARCHAR NOT NULL UNIQUE,
+               content_sha256 VARCHAR NOT NULL,
+               row_count BIGINT NOT NULL,
+               quality_report_json VARCHAR NOT NULL,
+               job_run_id VARCHAR,
+               created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+               )""",
+        ),
+    ),
 )
 
 
@@ -515,6 +536,134 @@ class Database:
         columns = ["ts_code", "captured_at", "price", "open", "high", "low", "pre_close", "volume", "amount", "source"]
         with self.connect() as connection:
             self._register_upsert(connection, "live_quotes", frame, columns)
+
+    @staticmethod
+    def _write_ingestion_manifest(
+        connection: duckdb.DuckDBPyConnection,
+        manifest: IngestionManifest,
+    ) -> None:
+        existing = connection.execute(
+            """SELECT dataset_kind, schema_version, provider, collected_at, snapshot_path,
+                      content_sha256, row_count, quality_report_json, job_run_id
+               FROM ingestion_manifests WHERE batch_id=?""",
+            [manifest.batch_id],
+        ).fetchone()
+        expected = (
+            manifest.dataset_kind.value,
+            manifest.schema_version,
+            manifest.provider,
+            manifest.collected_at,
+            manifest.snapshot_path.as_posix(),
+            manifest.content_sha256,
+            manifest.row_count,
+            manifest.quality_report_json,
+            manifest.job_run_id,
+        )
+        if existing is not None:
+            if tuple(existing) != expected:
+                raise ValueError(f"ingestion manifest collision: {manifest.batch_id}")
+            return
+        connection.execute(
+            """INSERT INTO ingestion_manifests (
+               batch_id, dataset_kind, schema_version, provider, collected_at,
+               snapshot_path, content_sha256, row_count, quality_report_json, job_run_id
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                manifest.batch_id,
+                manifest.dataset_kind.value,
+                manifest.schema_version,
+                manifest.provider,
+                manifest.collected_at,
+                manifest.snapshot_path.as_posix(),
+                manifest.content_sha256,
+                manifest.row_count,
+                manifest.quality_report_json,
+                manifest.job_run_id,
+            ],
+        )
+
+    def ingest_market_batch(self, frame: pd.DataFrame, manifest: IngestionManifest) -> None:
+        definitions = {
+            MarketDatasetKind.SECURITY: (
+                SECURITY_SCHEMA,
+                "securities",
+                ["ts_code", "symbol", "name", "exchange", "market", "list_date", "delist_date", "list_status"],
+            ),
+            MarketDatasetKind.TRADE_CALENDAR: (
+                TRADE_CALENDAR_SCHEMA,
+                "trade_calendar",
+                ["cal_date", "is_open", "pretrade_date"],
+            ),
+            MarketDatasetKind.DAILY_BAR: (
+                DAILY_BAR_SCHEMA,
+                "daily_bars",
+                [
+                    "ts_code",
+                    "trade_date",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "pre_close",
+                    "volume",
+                    "amount",
+                    "adj_factor",
+                    "up_limit",
+                    "down_limit",
+                    "suspended",
+                    "is_st",
+                ],
+            ),
+            MarketDatasetKind.LIVE_QUOTE: (
+                LIVE_QUOTE_SCHEMA,
+                "live_quotes",
+                ["ts_code", "captured_at", "price", "open", "high", "low", "pre_close", "volume", "amount", "source"],
+            ),
+        }
+        schema, table, columns = definitions[manifest.dataset_kind]
+        validated = schema.validate(frame)
+        if manifest.schema_version != schema.version:
+            raise ValueError(
+                f"ingestion manifest schema mismatch: {manifest.schema_version} != {schema.version}"
+            )
+        if manifest.row_count != validated.row_count:
+            raise ValueError(
+                f"ingestion manifest row count mismatch: {manifest.row_count} != {validated.row_count}"
+            )
+        with self.connect() as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                self._register_upsert(connection, table, validated.frame, columns)
+                self._write_ingestion_manifest(connection, manifest)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def get_ingestion_manifest(self, batch_id: str) -> dict[str, Any] | None:
+        with self.connect(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT * EXCLUDE(created_at) FROM ingestion_manifests WHERE batch_id=?",
+                [batch_id],
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(zip([item[0] for item in connection.description], row, strict=True))
+        manifest = IngestionManifest(
+            batch_id=str(result["batch_id"]),
+            dataset_kind=MarketDatasetKind(str(result["dataset_kind"])),
+            schema_version=str(result["schema_version"]),
+            provider=str(result["provider"]),
+            collected_at=result["collected_at"],
+            snapshot_path=Path(str(result["snapshot_path"])),
+            content_sha256=str(result["content_sha256"]),
+            row_count=int(result["row_count"]),
+            quality_report_json=str(result["quality_report_json"]),
+            job_run_id=str(result["job_run_id"]) if result["job_run_id"] is not None else None,
+        )
+        result["quality_report"] = manifest.quality_report
+        result["manifest"] = manifest
+        return result
 
     def get_securities(self) -> pd.DataFrame:
         with self.connect(read_only=True) as connection:
@@ -1431,6 +1580,7 @@ class Database:
             "job_leases",
             "reports",
             "strategy_attributions",
+            "ingestion_manifests",
         }
         if name not in allowed:
             raise ValueError(f"table not allowed: {name}")

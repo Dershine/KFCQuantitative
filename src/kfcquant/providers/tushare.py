@@ -13,6 +13,8 @@ from kfcquant.models import NewsDocument, SourceTier
 class TushareProvider:
     """Tushare adapter for EOD data, disclosures and licensed news endpoints."""
 
+    source_name = "tushare"
+
     def __init__(self, settings: Settings):
         if not settings.tushare_token:
             raise ValueError("TUSHARE_TOKEN is not configured")

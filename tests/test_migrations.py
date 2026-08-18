@@ -28,7 +28,7 @@ def test_empty_database_initialization_and_repeat_are_idempotent(tmp_path):
         ).fetchone()
         signal_columns = {row[1] for row in connection.execute("PRAGMA table_info('signal_runs')").fetchall()}
 
-    assert versions == [1, 2, 3, 4, 5]
+    assert versions == [1, 2, 3, 4, 5, 6]
     assert account == (123_456.0, 123_456.0)
     assert {"signal_kind", "strategy_version", "information_cutoff", "data_as_of", "lifecycle_state"} <= signal_columns
     with duckdb.connect(str(path), read_only=True) as connection:
@@ -46,6 +46,22 @@ def test_empty_database_initialization_and_repeat_are_idempotent(tmp_path):
         "parameter_hash",
         "parameter_snapshot_json",
     } <= attribution_columns
+    with duckdb.connect(str(path), read_only=True) as connection:
+        ingestion_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info('ingestion_manifests')").fetchall()
+        }
+    assert {
+        "batch_id",
+        "dataset_kind",
+        "schema_version",
+        "provider",
+        "collected_at",
+        "snapshot_path",
+        "content_sha256",
+        "row_count",
+        "quality_report_json",
+        "job_run_id",
+    } <= ingestion_columns
 
 
 def test_existing_signal_schema_is_migrated_in_place(tmp_path):
@@ -69,7 +85,7 @@ def test_existing_signal_schema_is_migrated_in_place(tmp_path):
     database.initialize()
     run = database.latest_signal_run()
 
-    assert database.migration_version() == 5
+    assert database.migration_version() == 6
     assert run["signal_kind"] == "preclose_entry"
     assert run["strategy_version"] == "preclose-v1"
     assert run["information_cutoff"] == run["as_of"]
@@ -166,20 +182,20 @@ def test_failure_after_strategy_attribution_migration_rolls_back_and_resumes(tmp
     path = tmp_path / "job-lease-migration-failure.duckdb"
     broken = (
         *MIGRATIONS,
-        Migration(6, "broken_after_strategy_attribution", ("CREATE TABLE partial (value INTEGER)", "BAD SQL")),
+        Migration(7, "broken_after_ingestion_manifest", ("CREATE TABLE partial (value INTEGER)", "BAD SQL")),
     )
-    fixed = (*MIGRATIONS, Migration(6, "fixed_after_strategy_attribution", ("CREATE TABLE partial (value INTEGER)",)))
+    fixed = (*MIGRATIONS, Migration(7, "fixed_after_ingestion_manifest", ("CREATE TABLE partial (value INTEGER)",)))
 
     with duckdb.connect(str(path)) as connection:
         runner = MigrationRunner(connection)
         with pytest.raises(duckdb.Error):
             runner.apply(broken)
-        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 5
+        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 6
         assert not connection.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_name='partial'"
         ).fetchone()
         runner.apply(fixed)
-        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 6
+        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 7
 
 
 def test_strategy_attribution_migration_preserves_old_positional_writers(tmp_path):

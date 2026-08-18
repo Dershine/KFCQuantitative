@@ -93,6 +93,8 @@ BaoStock按股票读取整个历史区间并分批写入DuckDB和Parquet。首�
 - `bars`大于0；
 - `securities`大于0。
 
+每个新持久化的证券、交易日历、日线或实时报价批次都会生成不可覆盖的Parquet快照，并在DuckDB的`ingestion_manifests`中记录实际Provider、采集时间、Schema版本、文件SHA-256、行数和质量报告。业务行与清单在同一数据库事务写入；旧快照保持原样，不会在升级时改写或删除。
+
 ### 4. 启动网页
 
 ```powershell

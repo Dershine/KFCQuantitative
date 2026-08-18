@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
 from sys import version as PYTHON_VERSION
 from sys import version_info as PYTHON_VERSION_INFO
 from typing import Any
@@ -11,6 +10,7 @@ import pandas as pd
 
 from kfcquant.config import SHANGHAI_TZ, Settings
 from kfcquant.db import Database, JobLeaseLostError
+from kfcquant.ingestion import IngestionManifest, IngestionSnapshotStore, resolve_provider_identity
 from kfcquant.interfaces import LiveQuoteProvider, LLMProvider, MarketDataProvider, NewsProvider
 from kfcquant.market_data import (
     DAILY_BAR_SCHEMA,
@@ -61,6 +61,7 @@ class Workflow:
             settings.runtime_dir / "database.lock",
         )
         self.database.initialize()
+        self.snapshot_store = IngestionSnapshotStore(settings.raw_data_dir)
         self.live_provider = live_provider or build_live_provider(settings)
         self._market_provider = market_provider
         self._news_provider = news_provider
@@ -106,35 +107,23 @@ class Workflow:
         """Recheck injected and production providers at the workflow trust boundary."""
         return schema.validate(frame).frame
 
-    def _raw_snapshot(self, provider: str, kind: str, at: datetime | date, frame: pd.DataFrame) -> Path | None:
-        if frame.empty:
-            return None
-        stamp = at if isinstance(at, datetime) else datetime.combine(at, time(0, 0), tzinfo=SHANGHAI_TZ)
-        directory = self.settings.raw_data_dir / provider / kind / stamp.strftime("%Y%m%d")
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{stamp.strftime('%H%M%S')}.parquet"
-        frame.to_parquet(path, index=False)
-        return path
-
-    def _raw_range_snapshot(
+    def _ingest_market_batch(
         self,
-        provider: str,
-        kind: str,
-        start: date,
-        end: date,
+        schema: MarketTableSchema,
         frame: pd.DataFrame,
-    ) -> Path | None:
-        if frame.empty:
-            return None
-        first_code = str(frame.iloc[0].get("ts_code", "market")).replace(".", "-")
-        last_code = str(frame.iloc[-1].get("ts_code", first_code)).replace(".", "-")
-        code = first_code if first_code == last_code else f"{first_code}_{last_code}"
-        directory = self.settings.raw_data_dir / provider / kind / f"{start:%Y%m%d}-{end:%Y%m%d}"
-        directory.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(SHANGHAI_TZ).strftime("%Y%m%d%H%M%S%f")
-        path = directory / f"{code}-{stamp}.parquet"
-        frame.to_parquet(path, index=False)
-        return path
+        provider: object,
+        job_run_id: str,
+    ) -> IngestionManifest:
+        validated = schema.validate(frame)
+        identity = resolve_provider_identity(provider, validated)
+        manifest = self.snapshot_store.capture(
+            validated,
+            identity,
+            datetime.now(SHANGHAI_TZ),
+            job_run_id,
+        )
+        self.database.ingest_market_batch(validated.frame, manifest)
+        return manifest
 
     def _job_start(self, name: str, at: datetime) -> str:
         job_id = str(uuid4())
@@ -292,16 +281,17 @@ class Workflow:
         try:
             securities = self._validated_market_frame(SECURITY_SCHEMA, self.market_provider.fetch_securities())
             self._job_heartbeat(job_id)
-            self.database.upsert_securities(securities)
+            manifests = [self._ingest_market_batch(SECURITY_SCHEMA, securities, self.market_provider, job_id)]
             calendar = self._validated_market_frame(
                 TRADE_CALENDAR_SCHEMA, self.market_provider.fetch_trade_calendar(start, end)
             )
             self._job_heartbeat(job_id)
-            self.database.upsert_trade_calendar(calendar)
+            manifests.append(
+                self._ingest_market_batch(TRADE_CALENDAR_SCHEMA, calendar, self.market_provider, job_id)
+            )
             open_dates = [row["cal_date"] for row in calendar.to_dict("records") if bool(row["is_open"])]
             rows = 0
             range_loader = getattr(self.market_provider, "iter_daily_range", None)
-            provider_name = str(getattr(self.market_provider, "source_name", self.settings.market_provider))
             if range_loader:
                 list_dates = pd.to_datetime(securities["list_date"], errors="coerce")
                 delist_dates = pd.to_datetime(securities["delist_date"], errors="coerce")
@@ -311,8 +301,9 @@ class Workflow:
                 for frame in range_loader(start, end, eligible["ts_code"].astype(str).tolist()):
                     frame = self._validated_market_frame(DAILY_BAR_SCHEMA, frame)
                     self._job_heartbeat(job_id)
-                    self.database.upsert_daily_bars(frame)
-                    self._raw_range_snapshot(provider_name, "daily", start, end, frame)
+                    manifests.append(
+                        self._ingest_market_batch(DAILY_BAR_SCHEMA, frame, self.market_provider, job_id)
+                    )
                     rows += len(frame)
             else:
                 for trade_date in open_dates:
@@ -320,12 +311,26 @@ class Workflow:
                         DAILY_BAR_SCHEMA, self.market_provider.fetch_daily(trade_date)
                     )
                     self._job_heartbeat(job_id)
-                    self.database.upsert_daily_bars(frame)
-                    self._raw_snapshot(provider_name, "daily", trade_date, frame)
+                    manifests.append(
+                        self._ingest_market_batch(DAILY_BAR_SCHEMA, frame, self.market_provider, job_id)
+                    )
                     rows += len(frame)
             message = f"synced {len(open_dates)} trading days and {rows} bars"
-            self._job_finish(job_id, "sync-eod", started, "success", message, bars=rows)
-            return {"trading_days": len(open_dates), "bars": rows, "securities": len(securities)}
+            self._job_finish(
+                job_id,
+                "sync-eod",
+                started,
+                "success",
+                message,
+                bars=rows,
+                ingestion_batches=len(manifests),
+            )
+            return {
+                "trading_days": len(open_dates),
+                "bars": rows,
+                "securities": len(securities),
+                "ingestion_batches": len(manifests),
+            }
         except Exception as exc:
             self._job_finish(job_id, "sync-eod", started, "failed", str(exc))
             raise
@@ -342,13 +347,20 @@ class Workflow:
                 ),
             )
             self._job_heartbeat(job_id)
-            self.database.upsert_trade_calendar(frame)
+            manifest = self._ingest_market_batch(TRADE_CALENDAR_SCHEMA, frame, self.market_provider, job_id)
             confirmed = self.database.is_trading_day(at.date()) or bool(
                 not frame.empty and (pd.to_datetime(frame["cal_date"]).dt.date == at.date()).any()
             )
             message = f"synced {len(frame)} calendar rows; today_confirmed={confirmed}"
-            self._job_finish(job_id, "sync-calendar", started, "success", message)
-            return {"rows": len(frame), "today_confirmed": confirmed}
+            self._job_finish(
+                job_id,
+                "sync-calendar",
+                started,
+                "success",
+                message,
+                ingestion_batch_id=manifest.batch_id,
+            )
+            return {"rows": len(frame), "today_confirmed": confirmed, "ingestion_batch_id": manifest.batch_id}
         except Exception as exc:
             self._job_finish(job_id, "sync-calendar", started, "failed", str(exc))
             raise
@@ -430,8 +442,7 @@ class Workflow:
             ).transition_to(ResearchRunState.COLLECTING_DATA)
             quotes = self._validated_market_frame(LIVE_QUOTE_SCHEMA, self.live_provider.fetch_quotes())
             self._job_heartbeat(job_id)
-            self.database.insert_live_quotes(quotes)
-            self._raw_snapshot("akshare", "quotes", as_of, quotes)
+            self._ingest_market_batch(LIVE_QUOTE_SCHEMA, quotes, self.live_provider, job_id)
             quote_times = (
                 pd.to_datetime(quotes["captured_at"], utc=True)
                 if not quotes.empty
@@ -696,8 +707,7 @@ class Workflow:
                 return []
             quotes = self._validated_market_frame(LIVE_QUOTE_SCHEMA, self.live_provider.fetch_quotes())
             self._job_heartbeat(job_id)
-            self.database.insert_live_quotes(quotes)
-            self._raw_snapshot("akshare", "quotes", at, quotes)
+            self._ingest_market_batch(LIVE_QUOTE_SCHEMA, quotes, self.live_provider, job_id)
             fills = self.portfolio.capture_buy_fills(str(run["run_id"]), at, quotes)
             self._job_finish(job_id, "capture-fill", started, "success", f"filled {len(fills)} orders")
             return fills

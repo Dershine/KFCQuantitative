@@ -19,6 +19,8 @@ class FakeMarket:
 
 
 class FakeLive:
+    source_name = "fixture-live"
+
     def __init__(self, quotes):
         self.quotes = quotes
 
