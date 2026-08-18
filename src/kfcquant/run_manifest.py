@@ -133,6 +133,20 @@ class RunInputSnapshotStore:
             )
         return True
 
+    def read(self, snapshot: RunInputSnapshot) -> pd.DataFrame:
+        """Read a verified snapshot without mutating the content-addressed store."""
+        self.verify(snapshot)
+        try:
+            frame = pd.read_parquet(self.resolve(snapshot))
+        except Exception as exc:
+            raise RuntimeError(f"run input snapshot cannot be read: {snapshot.snapshot_path}") from exc
+        if len(frame) != snapshot.row_count:
+            raise RuntimeError(
+                f"run input snapshot row count mismatch for {snapshot.snapshot_id}: "
+                f"expected {snapshot.row_count}, got {len(frame)}"
+            )
+        return frame
+
 
 def candidate_result_sha256(candidates: list[CandidateScore]) -> str:
     payload = [

@@ -10,6 +10,7 @@ from uuid import uuid4
 import pandas as pd
 
 from kfcquant import __version__
+from kfcquant.clock import Clock, SystemClock
 from kfcquant.config import SHANGHAI_TZ, Settings
 from kfcquant.db import Database, JobLeaseLostError
 from kfcquant.ingestion import IngestionManifest, IngestionSnapshotStore, resolve_provider_identity
@@ -21,7 +22,7 @@ from kfcquant.market_data import (
     TRADE_CALENDAR_SCHEMA,
     MarketTableSchema,
 )
-from kfcquant.models import CandidateScore, ResearchRunState, RunStatus, SignalKind, SignalRun
+from kfcquant.models import ResearchRunState, RunStatus, SignalKind, SignalRun
 from kfcquant.point_in_time import PointInTimeDataGateway
 from kfcquant.providers.document_loader import DocumentLoader
 from kfcquant.providers.factory import (
@@ -34,14 +35,17 @@ from kfcquant.run_manifest import (
     ResearchRunManifest,
     RunInputSnapshot,
     RunInputSnapshotStore,
-    candidate_result_sha256,
 )
 from kfcquant.runtime import build_identity
 from kfcquant.services.evaluation import CandidateEvaluationService
 from kfcquant.services.news import NewsService, NewsSyncResult
 from kfcquant.services.portfolio import PortfolioService
 from kfcquant.services.reports import ReportService
-from kfcquant.strategy import StrategyRegistry, build_default_strategy_registry
+from kfcquant.strategy import (
+    StrategyExecutionRunner,
+    StrategyRegistry,
+    build_default_strategy_registry,
+)
 from kfcquant.unit_of_work import (
     DuckDBResearchRunUnitOfWork,
     JobCompletion,
@@ -62,8 +66,10 @@ class Workflow:
         llm_provider: LLMProvider | None = None,
         run_uow: ResearchRunUnitOfWork | None = None,
         strategy_registry: StrategyRegistry | None = None,
+        clock: Clock | None = None,
     ):
         self.settings = settings
+        self.clock = clock or SystemClock(SHANGHAI_TZ)
         self.database = database or Database(
             settings.database_path,
             settings.initial_cash,
@@ -73,7 +79,7 @@ class Workflow:
         self.database.initialize()
         self.snapshot_store = IngestionSnapshotStore(settings.raw_data_dir)
         self.run_input_store = RunInputSnapshotStore(settings.raw_data_dir)
-        self.point_in_time = PointInTimeDataGateway(self.run_input_store)
+        self.point_in_time = PointInTimeDataGateway(self.run_input_store, self.clock)
         self.live_provider = live_provider or build_live_provider(settings)
         self._market_provider = market_provider
         self._news_provider = news_provider
@@ -86,6 +92,7 @@ class Workflow:
         self._llm_provider = llm_provider
         self.strategy_registry = strategy_registry or build_default_strategy_registry(settings)
         self.strategy_registry.require((SignalKind.MORNING_WATCHLIST, SignalKind.PRECLOSE_ENTRY))
+        self.strategy_runner = StrategyExecutionRunner(self.strategy_registry)
         self.portfolio = PortfolioService(self.database, settings, self.live_provider)
         self.evaluation = CandidateEvaluationService(self.database, settings, self.live_provider)
         self.run_uow = run_uow or DuckDBResearchRunUnitOfWork(self.database)
@@ -131,7 +138,7 @@ class Workflow:
         manifest = self.snapshot_store.capture(
             validated,
             identity,
-            datetime.now(SHANGHAI_TZ),
+            self.clock.now(),
             job_run_id,
         )
         self.database.ingest_market_batch(validated.frame, manifest)
@@ -143,7 +150,7 @@ class Workflow:
         return job_id
 
     def _job_heartbeat(self, job_id: str) -> datetime:
-        heartbeat_at = datetime.now(SHANGHAI_TZ)
+        heartbeat_at = self.clock.now()
         renewed = self.database.heartbeat_job(
             job_id,
             heartbeat_at,
@@ -154,7 +161,7 @@ class Workflow:
         return heartbeat_at
 
     def recover_expired_jobs(self, at: datetime | None = None) -> list[str]:
-        return self.database.recover_expired_jobs(at or datetime.now(SHANGHAI_TZ))
+        return self.database.recover_expired_jobs(at or self.clock.now())
 
     def _job_finish(
         self, job_id: str, name: str, started: datetime, status: str, message: str, **metadata: Any
@@ -183,23 +190,23 @@ class Workflow:
             metadata=metadata,
         )
 
-    @staticmethod
     def _run_manifest(
+        self,
         run: SignalRun,
         snapshots: tuple[RunInputSnapshot, ...],
-        candidates: list[CandidateScore],
+        result_sha256: str,
     ) -> ResearchRunManifest:
         identity = build_identity()
         return ResearchRunManifest.create(
             run,
             snapshots,
-            candidate_result_sha256(candidates),
+            result_sha256,
             source_sha=str(identity["source_sha"]),
             source_dirty=bool(identity["source_dirty"]),
             project_version=__version__,
             python_version=platform.python_version(),
             dependency_lock_sha256=str(identity["dependency_lock_sha256"]),
-            created_at=datetime.now(SHANGHAI_TZ),
+            created_at=self.clock.now(),
         )
 
     def doctor(self, online: bool = False) -> list[dict[str, object]]:
@@ -263,7 +270,7 @@ class Workflow:
                 checks.append({"check": f"module:{module}", "ok": False, "detail": str(exc)})
         if online:
             try:
-                today = datetime.now(SHANGHAI_TZ).date()
+                today = self.clock.now().date()
                 frame = self._validated_market_frame(
                     TRADE_CALENDAR_SCHEMA,
                     self.market_provider.fetch_trade_calendar(today - timedelta(days=2), today),
@@ -283,7 +290,7 @@ class Workflow:
             except Exception as exc:
                 checks.append({"check": "akshare-online", "ok": False, "detail": str(exc)})
             try:
-                now = datetime.now(SHANGHAI_TZ)
+                now = self.clock.now()
                 documents = self.news_provider.fetch_official_documents(now - timedelta(days=1), now)
                 checks.append(
                     {
@@ -307,7 +314,7 @@ class Workflow:
         return checks
 
     def sync_eod(self, start: date, end: date) -> dict[str, object]:
-        started = datetime.now(SHANGHAI_TZ)
+        started = self.clock.now()
         job_id = self._job_start("sync-eod", started)
         try:
             securities = self._validated_market_frame(SECURITY_SCHEMA, self.market_provider.fetch_securities())
@@ -367,8 +374,8 @@ class Workflow:
             raise
 
     def sync_calendar(self, at: datetime | None = None) -> dict[str, object]:
-        at = at or datetime.now(SHANGHAI_TZ)
-        started = datetime.now(SHANGHAI_TZ)
+        at = at or self.clock.now()
+        started = self.clock.now()
         job_id = self._job_start("sync-calendar", started)
         try:
             frame = self._validated_market_frame(
@@ -410,11 +417,11 @@ class Workflow:
         return service.sync(start, end)
 
     def run_preclose(self, as_of: datetime | None = None, research_outside_window: bool = False) -> SignalRun:
-        as_of = as_of or datetime.now(SHANGHAI_TZ)
+        as_of = as_of or self.clock.now()
         if as_of.tzinfo is None:
             as_of = as_of.replace(tzinfo=SHANGHAI_TZ)
         strategy = self.strategy_registry.resolve(SignalKind.PRECLOSE_ENTRY)
-        started = datetime.now(SHANGHAI_TZ)
+        started = self.clock.now()
         job_id = self._job_start("run-preclose", started)
         window_ok = self.settings.schedule.preclose_window.contains(as_of)
         trading_day = self.database.is_trading_day(as_of.date())
@@ -532,7 +539,11 @@ class Workflow:
                 previous_signal_as_of=morning_as_of,
                 quote_ingestion_manifest=quote_manifest,
             )
-            scored = strategy.evaluate(point_in_time.context)
+            execution = self.strategy_runner.execute(
+                point_in_time.context,
+                expected_identity=strategy.identity,
+            )
+            scored = execution.result
             self._job_heartbeat(job_id)
             selected = self.settings.selection.select_candidates(scored.candidates)
             tradable = window_ok and data_fresh and eod_fresh and news.official_healthy and bool(selected)
@@ -561,7 +572,11 @@ class Workflow:
             ).transition_to(ResearchRunState.STAGED)
             run = staged.transition_to(ResearchRunState.PUBLISHED)
             orders = self.portfolio.plan_candidate_orders(run, scored.candidates)
-            manifest = self._run_manifest(run, point_in_time.snapshots, scored.candidates)
+            manifest = self._run_manifest(
+                run,
+                point_in_time.snapshots,
+                execution.result_sha256,
+            )
             self.run_uow.commit(
                 run,
                 scored.candidates,
@@ -584,11 +599,11 @@ class Workflow:
             raise
 
     def run_morning(self, as_of: datetime | None = None, research_outside_window: bool = False) -> SignalRun:
-        as_of = as_of or datetime.now(SHANGHAI_TZ)
+        as_of = as_of or self.clock.now()
         if as_of.tzinfo is None:
             as_of = as_of.replace(tzinfo=SHANGHAI_TZ)
         strategy = self.strategy_registry.resolve(SignalKind.MORNING_WATCHLIST)
-        started = datetime.now(SHANGHAI_TZ)
+        started = self.clock.now()
         job_id = self._job_start("run-morning", started)
         window_ok = self.settings.schedule.morning_window.contains(as_of)
         if not self.database.is_trading_day(as_of.date()) or (not window_ok and not research_outside_window):
@@ -664,7 +679,11 @@ class Workflow:
                 risk_events=events,
                 unprocessed_official_codes=frozenset(unprocessed),
             )
-            scored = strategy.evaluate(point_in_time.context)
+            execution = self.strategy_runner.execute(
+                point_in_time.context,
+                expected_identity=strategy.identity,
+            )
+            scored = execution.result
             self._job_heartbeat(job_id)
             status = RunStatus.SUCCESS if eod_fresh and news.official_healthy else RunStatus.DEGRADED
             messages = list(news.messages)
@@ -685,7 +704,11 @@ class Workflow:
                 }
             ).transition_to(ResearchRunState.STAGED)
             run = staged.transition_to(ResearchRunState.PUBLISHED)
-            manifest = self._run_manifest(run, point_in_time.snapshots, scored.candidates)
+            manifest = self._run_manifest(
+                run,
+                point_in_time.snapshots,
+                execution.result_sha256,
+            )
             self.run_uow.commit(
                 run,
                 scored.candidates,
@@ -706,8 +729,8 @@ class Workflow:
             raise
 
     def evaluate_morning(self, at: datetime | None = None) -> list[object]:
-        at = at or datetime.now(SHANGHAI_TZ)
-        started = datetime.now(SHANGHAI_TZ)
+        at = at or self.clock.now()
+        started = self.clock.now()
         job_id = self._job_start("evaluate-morning", started)
         try:
             run = self.database.latest_signal_run(at.date(), SignalKind.MORNING_WATCHLIST.value)
@@ -719,16 +742,16 @@ class Workflow:
             raise
 
     def evaluate_previous_preclose(self, at: datetime | None = None) -> list[object]:
-        at = at or datetime.now(SHANGHAI_TZ)
+        at = at or self.clock.now()
         previous = self.database.previous_trading_day(at.date())
         run = self.database.latest_signal_run(previous, SignalKind.PRECLOSE_ENTRY.value) if previous else None
         return self.evaluation.evaluate(run, at) if run and run["status"] in {"success", "degraded"} else []
 
     def capture_fill(self, at: datetime | None = None) -> list[object]:
-        at = at or datetime.now(SHANGHAI_TZ)
+        at = at or self.clock.now()
         if at.tzinfo is None:
             at = at.replace(tzinfo=SHANGHAI_TZ)
-        started = datetime.now(SHANGHAI_TZ)
+        started = self.clock.now()
         job_id = self._job_start("capture-fill", started)
         if not self.settings.schedule.fill_window.contains(at):
             self._job_finish(
@@ -758,10 +781,10 @@ class Workflow:
         return self.settings.schedule.is_trading_session(at)
 
     def monitor_paper(self, at: datetime | None = None) -> list[object]:
-        at = at or datetime.now(SHANGHAI_TZ)
+        at = at or self.clock.now()
         if at.tzinfo is None:
             at = at.replace(tzinfo=SHANGHAI_TZ)
-        started = datetime.now(SHANGHAI_TZ)
+        started = self.clock.now()
         job_id = self._job_start("monitor-paper", started)
         if not self.database.is_trading_day(at.date()) or not self._in_trading_session(at):
             self._job_finish(job_id, "monitor-paper", started, "success", "outside trading session; no-op")
@@ -776,10 +799,10 @@ class Workflow:
             raise
 
     def run_postclose(self, at: datetime | None = None) -> str:
-        at = at or datetime.now(SHANGHAI_TZ)
+        at = at or self.clock.now()
         if at.tzinfo is None:
             at = at.replace(tzinfo=SHANGHAI_TZ)
-        started = datetime.now(SHANGHAI_TZ)
+        started = self.clock.now()
         job_id = self._job_start("run-postclose", started)
         try:
             run = self.database.latest_signal_run(at.date(), SignalKind.PRECLOSE_ENTRY.value)

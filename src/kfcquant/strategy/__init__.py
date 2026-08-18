@@ -10,6 +10,11 @@ from kfcquant.strategy.defaults import (
     PrecloseEntryStrategy,
     build_default_strategy_registry,
 )
+from kfcquant.strategy.execution import (
+    StrategyExecution,
+    StrategyExecutionRunner,
+    StrategyExecutionViolation,
+)
 from kfcquant.strategy.features import (
     MORNING_FEATURE_SCHEMA,
     PRECLOSE_FEATURE_SCHEMA,
@@ -40,6 +45,9 @@ __all__ = [
     "ScoreModel",
     "Strategy",
     "StrategyContext",
+    "StrategyExecution",
+    "StrategyExecutionRunner",
+    "StrategyExecutionViolation",
     "StrategyIdentity",
     "StrategyParameterSnapshot",
     "StrategyRegistry",

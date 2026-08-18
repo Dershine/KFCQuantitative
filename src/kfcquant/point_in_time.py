@@ -5,6 +5,8 @@ from datetime import datetime
 
 import pandas as pd
 
+from kfcquant.clock import Clock, SystemClock
+from kfcquant.config import SHANGHAI_TZ
 from kfcquant.ingestion import IngestionManifest, MarketDatasetKind
 from kfcquant.market_data import DAILY_BAR_SCHEMA, LIVE_QUOTE_SCHEMA, SECURITY_SCHEMA
 from kfcquant.models import SignalKind
@@ -25,8 +27,9 @@ class PointInTimeContext:
 class PointInTimeDataGateway:
     """Validate availability time and capture the exact inputs supplied to Strategy."""
 
-    def __init__(self, snapshot_store: RunInputSnapshotStore):
+    def __init__(self, snapshot_store: RunInputSnapshotStore, clock: Clock | None = None):
         self.snapshot_store = snapshot_store
+        self.clock = clock or SystemClock(SHANGHAI_TZ)
 
     @staticmethod
     def _require_aware(label: str, value: datetime) -> None:
@@ -62,6 +65,36 @@ class PointInTimeDataGateway:
         if (values > pd.Timestamp(cutoff).tz_convert("UTC")).any():
             raise PointInTimeViolation(f"{dataset} contains data after information_cutoff")
 
+    @classmethod
+    def validate_strategy_inputs(
+        cls,
+        *,
+        as_of: datetime,
+        information_cutoff: datetime,
+        securities: pd.DataFrame,
+        bars: pd.DataFrame,
+        quotes: pd.DataFrame,
+        risk_events: pd.DataFrame,
+        previous_signal_as_of: datetime | None = None,
+    ) -> None:
+        """Apply the shared live/replay time boundary before Strategy sees inputs."""
+        cls._require_aware("as_of", as_of)
+        cls._require_aware("information_cutoff", information_cutoff)
+        if information_cutoff > as_of:
+            raise PointInTimeViolation("information_cutoff cannot be after as_of")
+        cls._validate_date_column(
+            "security", securities, "list_date", information_cutoff, same_day_is_future=False
+        )
+        cls._validate_date_column(
+            "daily_bar", bars, "trade_date", information_cutoff, same_day_is_future=True
+        )
+        cls._validate_timestamp_column("live_quote", quotes, "captured_at", information_cutoff)
+        cls._validate_timestamp_column("risk_event", risk_events, "published_at", information_cutoff)
+        if previous_signal_as_of is not None:
+            cls._require_aware("previous_signal_as_of", previous_signal_as_of)
+            if previous_signal_as_of > information_cutoff:
+                raise PointInTimeViolation("previous_signal is after information_cutoff")
+
     def build_context(
         self,
         *,
@@ -79,28 +112,21 @@ class PointInTimeDataGateway:
         quote_ingestion_manifest: IngestionManifest | None = None,
         captured_at: datetime | None = None,
     ) -> PointInTimeContext:
-        self._require_aware("as_of", as_of)
-        self._require_aware("information_cutoff", information_cutoff)
-        if information_cutoff > as_of:
-            raise PointInTimeViolation("information_cutoff cannot be after as_of")
         quote_frame = quotes.copy() if quotes is not None else pd.DataFrame()
         risk_frame = (
             risk_events.copy()
             if risk_events is not None
             else pd.DataFrame(columns=["event_id", "ts_code", "published_at"])
         )
-        self._validate_date_column(
-            "security", securities, "list_date", information_cutoff, same_day_is_future=False
+        self.validate_strategy_inputs(
+            as_of=as_of,
+            information_cutoff=information_cutoff,
+            securities=securities,
+            bars=bars,
+            quotes=quote_frame,
+            risk_events=risk_frame,
+            previous_signal_as_of=previous_signal_as_of,
         )
-        self._validate_date_column(
-            "daily_bar", bars, "trade_date", information_cutoff, same_day_is_future=True
-        )
-        self._validate_timestamp_column("live_quote", quote_frame, "captured_at", information_cutoff)
-        self._validate_timestamp_column("risk_event", risk_frame, "published_at", information_cutoff)
-        if previous_signal_as_of is not None:
-            self._require_aware("previous_signal_as_of", previous_signal_as_of)
-            if previous_signal_as_of > information_cutoff:
-                raise PointInTimeViolation("previous_signal is after information_cutoff")
         if quote_ingestion_manifest is not None:
             if quote_ingestion_manifest.dataset_kind != MarketDatasetKind.LIVE_QUOTE:
                 raise PointInTimeViolation("live_quote references a non-quote ingestion batch")
@@ -109,7 +135,7 @@ class PointInTimeDataGateway:
             if quote_ingestion_manifest.row_count != len(quote_frame):
                 raise PointInTimeViolation("live_quote ingestion row count does not match the Strategy input")
 
-        captured_at = captured_at or datetime.now(information_cutoff.tzinfo)
+        captured_at = captured_at or self.clock.now()
         common = {
             "captured_at": captured_at,
             "information_cutoff": information_cutoff,
