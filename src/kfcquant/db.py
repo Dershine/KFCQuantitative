@@ -28,6 +28,7 @@ from kfcquant.models import (
     SignalRun,
     StrategyAttribution,
 )
+from kfcquant.run_manifest import ResearchRunManifest
 from kfcquant.strategy_identity import StrategyParameterSnapshot, canonical_parameter_json, parameter_hash
 
 LOGGER = logging.getLogger(__name__)
@@ -332,6 +333,30 @@ MIGRATIONS = (
                quality_report_json VARCHAR NOT NULL,
                job_run_id VARCHAR,
                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+               )""",
+        ),
+    ),
+    Migration(
+        7,
+        "research_run_manifests",
+        (
+            """CREATE TABLE IF NOT EXISTS run_manifests (
+               run_id VARCHAR PRIMARY KEY,
+               manifest_version VARCHAR NOT NULL,
+               signal_kind VARCHAR NOT NULL,
+               information_cutoff TIMESTAMPTZ NOT NULL,
+               strategy_id VARCHAR NOT NULL,
+               strategy_version VARCHAR NOT NULL,
+               parameter_hash VARCHAR NOT NULL,
+               source_sha VARCHAR NOT NULL,
+               source_dirty BOOLEAN NOT NULL,
+               project_version VARCHAR NOT NULL,
+               python_version VARCHAR NOT NULL,
+               dependency_lock_sha256 VARCHAR NOT NULL,
+               result_sha256 VARCHAR NOT NULL,
+               manifest_sha256 VARCHAR NOT NULL UNIQUE,
+               manifest_json VARCHAR NOT NULL,
+               created_at TIMESTAMPTZ NOT NULL
                )""",
         ),
     ),
@@ -663,6 +688,73 @@ class Database:
         )
         result["quality_report"] = manifest.quality_report
         result["manifest"] = manifest
+        return result
+
+    @staticmethod
+    def _write_run_manifest(
+        connection: duckdb.DuckDBPyConnection,
+        manifest: ResearchRunManifest,
+    ) -> None:
+        for snapshot in manifest.input_snapshots:
+            for batch_id in snapshot.ingestion_batch_ids:
+                upstream = connection.execute(
+                    """SELECT dataset_kind, schema_version
+                       FROM ingestion_manifests WHERE batch_id=?""",
+                    [batch_id],
+                ).fetchone()
+                if upstream is None:
+                    raise ValueError(f"run manifest references unknown ingestion batch: {batch_id}")
+                expected = (snapshot.dataset_kind.value, snapshot.schema_version)
+                if tuple(upstream) != expected:
+                    raise ValueError(
+                        f"run manifest ingestion batch contract mismatch: {batch_id}"
+                    )
+        existing = connection.execute(
+            "SELECT manifest_sha256, manifest_json FROM run_manifests WHERE run_id=?",
+            [manifest.run_id],
+        ).fetchone()
+        expected = (manifest.manifest_sha256, manifest.canonical_json)
+        if existing is not None:
+            if tuple(existing) != expected:
+                raise ValueError(f"run manifest is immutable for run: {manifest.run_id}")
+            return
+        connection.execute(
+            """INSERT INTO run_manifests (
+               run_id, manifest_version, signal_kind, information_cutoff,
+               strategy_id, strategy_version, parameter_hash, source_sha,
+               source_dirty, project_version, python_version, dependency_lock_sha256,
+               result_sha256, manifest_sha256, manifest_json, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                manifest.run_id,
+                manifest.manifest_version,
+                manifest.signal_kind.value,
+                manifest.information_cutoff,
+                manifest.strategy_id,
+                manifest.strategy_version,
+                manifest.parameter_hash,
+                manifest.source_sha,
+                manifest.source_dirty,
+                manifest.project_version,
+                manifest.python_version,
+                manifest.dependency_lock_sha256,
+                manifest.result_sha256,
+                manifest.manifest_sha256,
+                manifest.canonical_json,
+                manifest.created_at,
+            ],
+        )
+
+    def get_run_manifest(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM run_manifests WHERE run_id=?",
+                [run_id],
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(zip([item[0] for item in connection.description], row, strict=True))
+        result["manifest"] = ResearchRunManifest.model_validate_json(result["manifest_json"])
         return result
 
     def get_securities(self) -> pd.DataFrame:
@@ -1581,6 +1673,7 @@ class Database:
             "reports",
             "strategy_attributions",
             "ingestion_manifests",
+            "run_manifests",
         }
         if name not in allowed:
             raise ValueError(f"table not allowed: {name}")

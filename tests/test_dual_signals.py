@@ -7,6 +7,7 @@ import pandas as pd
 from kfcquant.config import SHANGHAI_TZ
 from kfcquant.db import Database
 from kfcquant.models import CandidateScore, FactorBreakdown, RunStatus, SignalKind, SignalRun
+from kfcquant.run_manifest import RunInputKind
 from kfcquant.services.evaluation import CandidateEvaluationService
 from kfcquant.services.scoring import ScoringService
 from kfcquant.services.workflow import Workflow
@@ -45,6 +46,11 @@ def test_morning_watchlist_is_separate_and_never_creates_orders(settings):
     assert database.proposed_orders(run.run_id).empty
     assert database.latest_signal_run(at.date(), SignalKind.MORNING_WATCHLIST.value)["run_id"] == run.run_id
     assert database.latest_signal_run(at.date(), SignalKind.PRECLOSE_ENTRY.value) is None
+    manifest = database.get_run_manifest(run.run_id)["manifest"]
+    kinds = {snapshot.dataset_kind for snapshot in manifest.input_snapshots}
+    assert RunInputKind.SECURITY in kinds
+    assert RunInputKind.DAILY_BAR in kinds
+    assert RunInputKind.LIVE_QUOTE not in kinds
 
 
 def test_morning_positive_news_is_capped_at_ten(settings):

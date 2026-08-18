@@ -16,6 +16,7 @@ from kfcquant.models import (
     RunStatus,
     SignalRun,
 )
+from kfcquant.run_manifest import ResearchRunManifest, candidate_result_sha256
 from kfcquant.strategy_identity import canonical_parameter_json
 
 LOGGER = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class ResearchRunUnitOfWork(Protocol):
         candidates: list[CandidateScore],
         orders: list[PaperOrder],
         job: JobCompletion,
+        manifest: ResearchRunManifest | None = None,
     ) -> bool: ...
 
 
@@ -55,6 +57,7 @@ class DuckDBResearchRunUnitOfWork:
         candidates: list[CandidateScore],
         orders: list[PaperOrder],
         job: JobCompletion,
+        manifest: ResearchRunManifest | None,
     ) -> None:
         if run.lifecycle_state not in {
             ResearchRunState.PUBLISHED,
@@ -86,9 +89,34 @@ class DuckDBResearchRunUnitOfWork:
         if job.status != run.status.value:
             raise ValueError("job completion status must match the research run result")
         if run.lifecycle_state != ResearchRunState.PUBLISHED:
-            if candidates or orders or run.tradable:
+            if candidates or orders or run.tradable or manifest is not None:
                 raise ValueError("failed or missed runs cannot publish candidates or orders")
             return
+        if manifest is None:
+            raise ValueError("a published run requires a complete run manifest")
+        manifest = ResearchRunManifest.model_validate_json(manifest.model_dump_json())
+        expected_manifest_identity = (
+            run.run_id,
+            run.signal_kind,
+            run.information_cutoff or run.as_of,
+            run.strategy_id,
+            run.strategy_version,
+            run.parameter_hash,
+            canonical_parameter_json(run.strategy_parameters),
+        )
+        actual_manifest_identity = (
+            manifest.run_id,
+            manifest.signal_kind,
+            manifest.information_cutoff,
+            manifest.strategy_id,
+            manifest.strategy_version,
+            manifest.parameter_hash,
+            canonical_parameter_json(manifest.strategy_parameters),
+        )
+        if actual_manifest_identity != expected_manifest_identity:
+            raise ValueError("run manifest identity must match the published run")
+        if any(snapshot.information_cutoff != manifest.information_cutoff for snapshot in manifest.input_snapshots):
+            raise ValueError("run manifest input snapshots must share the run information cutoff")
         if run.status not in {RunStatus.SUCCESS, RunStatus.DEGRADED}:
             raise ValueError("a published run requires a successful or degraded result")
         unblocked = {candidate.ts_code for candidate in candidates if not candidate.blocked}
@@ -106,6 +134,8 @@ class DuckDBResearchRunUnitOfWork:
         order_ids = {order.order_id for order in orders}
         if len(order_keys) != len(orders) or len(order_ids) != len(orders):
             raise ValueError("publication contains duplicate orders")
+        if manifest.result_sha256 != candidate_result_sha256(candidates):
+            raise ValueError("run manifest result hash must match the published candidates")
 
     @staticmethod
     def _is_identical_existing_publication(
@@ -114,6 +144,7 @@ class DuckDBResearchRunUnitOfWork:
         candidates: list[CandidateScore],
         orders: list[PaperOrder],
         job: JobCompletion,
+        manifest: ResearchRunManifest | None,
     ) -> bool:
         stored = connection.execute(
             """SELECT r.status, r.lifecycle_state, r.tradable, r.candidate_count,
@@ -170,11 +201,17 @@ class DuckDBResearchRunUnitOfWork:
             [job.job_run_id],
         ).fetchone()
         expected_job = (job.job_name, job.status, job.message)
+        stored_manifest = connection.execute(
+            "SELECT manifest_sha256 FROM run_manifests WHERE run_id=?",
+            [run.run_id],
+        ).fetchone()
+        expected_manifest = (manifest.manifest_sha256,) if manifest is not None else None
         if (
             stored == expected_run
             and stored_candidates == expected_candidates
             and stored_orders == expected_orders
             and stored_job == expected_job
+            and stored_manifest == expected_manifest
         ):
             return True
         raise ValueError("published research run is immutable and conflicts with existing rows")
@@ -188,17 +225,21 @@ class DuckDBResearchRunUnitOfWork:
         candidates: list[CandidateScore],
         orders: list[PaperOrder],
         job: JobCompletion,
+        manifest: ResearchRunManifest | None = None,
     ) -> bool:
-        self._validate(run, candidates, orders, job)
+        self._validate(run, candidates, orders, job, manifest)
         with self.database.connect() as connection:
             connection.execute("BEGIN TRANSACTION")
             try:
-                if self._is_identical_existing_publication(connection, run, candidates, orders, job):
+                if self._is_identical_existing_publication(connection, run, candidates, orders, job, manifest):
                     connection.execute("COMMIT")
                     return False
                 self.database._assert_active_job_lease(connection, job.job_run_id, job.finished_at)
                 self.database._write_signal_run(connection, run)
                 self._checkpoint("run")
+                if manifest is not None:
+                    self.database._write_run_manifest(connection, manifest)
+                self._checkpoint("manifest")
                 self.database._write_candidates(connection, candidates)
                 self._checkpoint("candidates")
                 for order in orders:

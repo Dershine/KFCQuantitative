@@ -95,6 +95,8 @@ BaoStock按股票读取整个历史区间并分批写入DuckDB和Parquet。首�
 
 每个新持久化的证券、交易日历、日线或实时报价批次都会生成不可覆盖的Parquet快照，并在DuckDB的`ingestion_manifests`中记录实际Provider、采集时间、Schema版本、文件SHA-256、行数和质量报告。业务行与清单在同一数据库事务写入；旧快照保持原样，不会在升级时改写或删除。
 
+每个新Published Signal Run还会通过Point-in-time Data Gateway复核证券、日线、实时报价、风险事件和前序信号的截止时间，并把实际送入Strategy的精确DataFrame保存为`data/raw/run-inputs/`下的内容寻址Parquet；相同内容自动复用。DuckDB的`run_manifests`会原子记录源码SHA及dirty状态、项目/Python/依赖锁版本、Strategy参数、输入快照和上游采集批次、候选结果Hash。截止时间后的数据会使运行失败关闭，不会产生Published Run或模拟买单。
+
 ### 4. 启动网页
 
 ```powershell

@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 
 import pandas as pd
+import pytest
 
 from kfcquant.config import SHANGHAI_TZ
 from kfcquant.db import Database
+from kfcquant.run_manifest import RunInputKind
 from kfcquant.services.workflow import Workflow
 from tests.conftest import make_daily, make_quotes, make_securities
 
@@ -90,6 +92,50 @@ def test_preclose_end_to_end_creates_auditable_orders(settings):
     assert run.candidate_count == len(codes)
     assert len(database.get_candidates(run.run_id)) == len(codes)
     assert len(database.proposed_orders(run.run_id)) == len(codes)  # first five plus one reserve candidate
+    stored_manifest = database.get_run_manifest(run.run_id)["manifest"]
+    assert stored_manifest.run_id == run.run_id
+    assert stored_manifest.source_sha
+    assert isinstance(stored_manifest.source_dirty, bool)
+    assert len(stored_manifest.dependency_lock_sha256) == 64
+    assert len(stored_manifest.result_sha256) == 64
+    assert {snapshot.dataset_kind for snapshot in stored_manifest.input_snapshots} >= {
+        RunInputKind.SECURITY,
+        RunInputKind.DAILY_BAR,
+        RunInputKind.LIVE_QUOTE,
+    }
+    quote_snapshot = next(
+        snapshot
+        for snapshot in stored_manifest.input_snapshots
+        if snapshot.dataset_kind == RunInputKind.LIVE_QUOTE
+    )
+    assert len(quote_snapshot.ingestion_batch_ids) == 1
+
+
+def test_preclose_future_quote_fails_before_strategy_and_never_publishes_or_orders(settings):
+    at = datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ)
+    code = "600000.SH"
+    database = Database(settings.database_path, settings.initial_cash)
+    database.initialize()
+    database.upsert_trade_calendar(
+        pd.DataFrame([{"cal_date": at.date(), "is_open": True, "pretrade_date": date(2026, 8, 7)}])
+    )
+    database.upsert_securities(make_securities([(code, code)]))
+    database.upsert_daily_bars(make_daily([code], at))
+    workflow = Workflow(
+        settings,
+        database=database,
+        market_provider=FakeMarket(),
+        live_provider=FakeLive(make_quotes([code], at + timedelta(seconds=1))),
+        llm_provider=FakeLLM(),
+    )
+
+    with pytest.raises(ValueError, match="live_quote.*information_cutoff"):
+        workflow.run_preclose(as_of=at)
+
+    assert database.latest_signal_run(include_non_terminal=True) is None
+    assert database.table("run_manifests").empty
+    assert database.table("paper_orders").empty
+    assert database.latest_job("run-preclose")["status"] == "failed"
 
 
 def test_preclose_outside_window_is_recorded_missed(settings):

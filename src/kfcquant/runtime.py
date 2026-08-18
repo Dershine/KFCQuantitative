@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
+import subprocess
 from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 
 from kfcquant import __version__
@@ -11,10 +14,48 @@ from kfcquant.config import SHANGHAI_TZ, Settings
 from kfcquant.db import Database
 
 
+@lru_cache(maxsize=1)
+def build_identity() -> dict[str, object]:
+    configured_sha = os.getenv("KFCQUANT_SOURCE_SHA", "").strip()
+    repository_root = Path(__file__).resolve().parents[2]
+    source_sha = configured_sha
+    source_dirty = False
+    if not source_sha:
+        try:
+            source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            source_dirty = bool(
+                subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=repository_root,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            )
+        except (OSError, subprocess.SubprocessError):
+            source_sha = "development"
+            source_dirty = True
+    lock_path = repository_root / "requirements.lock"
+    dependency_lock_sha256 = (
+        hashlib.sha256(lock_path.read_bytes()).hexdigest() if lock_path.is_file() else "unavailable"
+    )
+    return {
+        "source_sha": source_sha,
+        "source_dirty": source_dirty,
+        "dependency_lock_sha256": dependency_lock_sha256,
+    }
+
+
 def version_info(settings: Settings) -> dict[str, object]:
     return {
         "version": __version__,
-        "source_sha": os.getenv("KFCQUANT_SOURCE_SHA", "development"),
+        **build_identity(),
         "build_time": os.getenv("KFCQUANT_BUILD_TIME", "unknown"),
         "morning_strategy": settings.strategy_version_morning,
         "preclose_strategy": settings.strategy_version_preclose,

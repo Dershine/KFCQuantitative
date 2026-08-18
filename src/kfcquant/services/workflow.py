@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import platform
 from datetime import date, datetime, time, timedelta
 from sys import version as PYTHON_VERSION
 from sys import version_info as PYTHON_VERSION_INFO
@@ -8,6 +9,7 @@ from uuid import uuid4
 
 import pandas as pd
 
+from kfcquant import __version__
 from kfcquant.config import SHANGHAI_TZ, Settings
 from kfcquant.db import Database, JobLeaseLostError
 from kfcquant.ingestion import IngestionManifest, IngestionSnapshotStore, resolve_provider_identity
@@ -19,7 +21,8 @@ from kfcquant.market_data import (
     TRADE_CALENDAR_SCHEMA,
     MarketTableSchema,
 )
-from kfcquant.models import ResearchRunState, RunStatus, SignalKind, SignalRun
+from kfcquant.models import CandidateScore, ResearchRunState, RunStatus, SignalKind, SignalRun
+from kfcquant.point_in_time import PointInTimeDataGateway
 from kfcquant.providers.document_loader import DocumentLoader
 from kfcquant.providers.factory import (
     build_live_provider,
@@ -27,11 +30,18 @@ from kfcquant.providers.factory import (
     build_market_provider,
     build_news_provider,
 )
+from kfcquant.run_manifest import (
+    ResearchRunManifest,
+    RunInputSnapshot,
+    RunInputSnapshotStore,
+    candidate_result_sha256,
+)
+from kfcquant.runtime import build_identity
 from kfcquant.services.evaluation import CandidateEvaluationService
 from kfcquant.services.news import NewsService, NewsSyncResult
 from kfcquant.services.portfolio import PortfolioService
 from kfcquant.services.reports import ReportService
-from kfcquant.strategy import StrategyContext, StrategyRegistry, build_default_strategy_registry
+from kfcquant.strategy import StrategyRegistry, build_default_strategy_registry
 from kfcquant.unit_of_work import (
     DuckDBResearchRunUnitOfWork,
     JobCompletion,
@@ -62,6 +72,8 @@ class Workflow:
         )
         self.database.initialize()
         self.snapshot_store = IngestionSnapshotStore(settings.raw_data_dir)
+        self.run_input_store = RunInputSnapshotStore(settings.raw_data_dir)
+        self.point_in_time = PointInTimeDataGateway(self.run_input_store)
         self.live_provider = live_provider or build_live_provider(settings)
         self._market_provider = market_provider
         self._news_provider = news_provider
@@ -169,6 +181,25 @@ class Workflow:
             status=status,
             message=message,
             metadata=metadata,
+        )
+
+    @staticmethod
+    def _run_manifest(
+        run: SignalRun,
+        snapshots: tuple[RunInputSnapshot, ...],
+        candidates: list[CandidateScore],
+    ) -> ResearchRunManifest:
+        identity = build_identity()
+        return ResearchRunManifest.create(
+            run,
+            snapshots,
+            candidate_result_sha256(candidates),
+            source_sha=str(identity["source_sha"]),
+            source_dirty=bool(identity["source_dirty"]),
+            project_version=__version__,
+            python_version=platform.python_version(),
+            dependency_lock_sha256=str(identity["dependency_lock_sha256"]),
+            created_at=datetime.now(SHANGHAI_TZ),
         )
 
     def doctor(self, online: bool = False) -> list[dict[str, object]]:
@@ -442,7 +473,9 @@ class Workflow:
             ).transition_to(ResearchRunState.COLLECTING_DATA)
             quotes = self._validated_market_frame(LIVE_QUOTE_SCHEMA, self.live_provider.fetch_quotes())
             self._job_heartbeat(job_id)
-            self._ingest_market_batch(LIVE_QUOTE_SCHEMA, quotes, self.live_provider, job_id)
+            quote_manifest = self._ingest_market_batch(
+                LIVE_QUOTE_SCHEMA, quotes, self.live_provider, job_id
+            )
             quote_times = (
                 pd.to_datetime(quotes["captured_at"], utc=True)
                 if not quotes.empty
@@ -478,25 +511,28 @@ class Workflow:
             ).transition_to(ResearchRunState.EVALUATING)
             morning_run = self.database.latest_signal_run(as_of.date(), SignalKind.MORNING_WATCHLIST.value)
             morning_codes: set[str] = set()
+            morning_as_of: datetime | None = None
             if morning_run:
+                morning_as_of = morning_run["as_of"]
                 morning_frame = self.settings.selection.select_frame(
                     self.database.get_candidates(str(morning_run["run_id"]), include_blocked=True)
                 )
                 morning_codes = set(morning_frame["ts_code"].astype(str)) if not morning_frame.empty else set()
-            scored = strategy.evaluate(
-                StrategyContext(
-                    run_id=provisional.run_id,
-                    signal_kind=SignalKind.PRECLOSE_ENTRY,
-                    as_of=as_of,
-                    information_cutoff=provisional.information_cutoff or as_of,
-                    securities=securities,
-                    bars=bars,
-                    quotes=quotes,
-                    risk_events=events,
-                    unprocessed_official_codes=frozenset(unprocessed),
-                    previous_signal_codes=frozenset(morning_codes),
-                )
+            point_in_time = self.point_in_time.build_context(
+                run_id=provisional.run_id,
+                signal_kind=SignalKind.PRECLOSE_ENTRY,
+                as_of=as_of,
+                information_cutoff=provisional.information_cutoff or as_of,
+                securities=securities,
+                bars=bars,
+                quotes=quotes,
+                risk_events=events,
+                unprocessed_official_codes=frozenset(unprocessed),
+                previous_signal_codes=frozenset(morning_codes),
+                previous_signal_as_of=morning_as_of,
+                quote_ingestion_manifest=quote_manifest,
             )
+            scored = strategy.evaluate(point_in_time.context)
             self._job_heartbeat(job_id)
             selected = self.settings.selection.select_candidates(scored.candidates)
             tradable = window_ok and data_fresh and eod_fresh and news.official_healthy and bool(selected)
@@ -525,6 +561,7 @@ class Workflow:
             ).transition_to(ResearchRunState.STAGED)
             run = staged.transition_to(ResearchRunState.PUBLISHED)
             orders = self.portfolio.plan_candidate_orders(run, scored.candidates)
+            manifest = self._run_manifest(run, point_in_time.snapshots, scored.candidates)
             self.run_uow.commit(
                 run,
                 scored.candidates,
@@ -539,6 +576,7 @@ class Workflow:
                     orders=len(orders),
                     tradable=run.tradable,
                 ),
+                manifest,
             )
             return run
         except Exception as exc:
@@ -616,18 +654,17 @@ class Workflow:
                     "mainstream_news_healthy": news.mainstream_healthy,
                 }
             ).transition_to(ResearchRunState.EVALUATING)
-            scored = strategy.evaluate(
-                StrategyContext(
-                    run_id=provisional.run_id,
-                    signal_kind=SignalKind.MORNING_WATCHLIST,
-                    as_of=as_of,
-                    information_cutoff=provisional.information_cutoff or as_of,
-                    securities=self.database.get_securities(),
-                    bars=bars,
-                    risk_events=events,
-                    unprocessed_official_codes=frozenset(unprocessed),
-                )
+            point_in_time = self.point_in_time.build_context(
+                run_id=provisional.run_id,
+                signal_kind=SignalKind.MORNING_WATCHLIST,
+                as_of=as_of,
+                information_cutoff=provisional.information_cutoff or as_of,
+                securities=self.database.get_securities(),
+                bars=bars,
+                risk_events=events,
+                unprocessed_official_codes=frozenset(unprocessed),
             )
+            scored = strategy.evaluate(point_in_time.context)
             self._job_heartbeat(job_id)
             status = RunStatus.SUCCESS if eod_fresh and news.official_healthy else RunStatus.DEGRADED
             messages = list(news.messages)
@@ -648,6 +685,7 @@ class Workflow:
                 }
             ).transition_to(ResearchRunState.STAGED)
             run = staged.transition_to(ResearchRunState.PUBLISHED)
+            manifest = self._run_manifest(run, point_in_time.snapshots, scored.candidates)
             self.run_uow.commit(
                 run,
                 scored.candidates,
@@ -660,6 +698,7 @@ class Workflow:
                     run.message,
                     candidates=run.candidate_count,
                 ),
+                manifest,
             )
             return run
         except Exception as exc:

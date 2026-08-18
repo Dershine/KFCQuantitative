@@ -28,7 +28,7 @@ def test_empty_database_initialization_and_repeat_are_idempotent(tmp_path):
         ).fetchone()
         signal_columns = {row[1] for row in connection.execute("PRAGMA table_info('signal_runs')").fetchall()}
 
-    assert versions == [1, 2, 3, 4, 5, 6]
+    assert versions == [1, 2, 3, 4, 5, 6, 7]
     assert account == (123_456.0, 123_456.0)
     assert {"signal_kind", "strategy_version", "information_cutoff", "data_as_of", "lifecycle_state"} <= signal_columns
     with duckdb.connect(str(path), read_only=True) as connection:
@@ -62,6 +62,28 @@ def test_empty_database_initialization_and_repeat_are_idempotent(tmp_path):
         "quality_report_json",
         "job_run_id",
     } <= ingestion_columns
+    with duckdb.connect(str(path), read_only=True) as connection:
+        manifest_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info('run_manifests')").fetchall()
+        }
+    assert {
+        "run_id",
+        "manifest_version",
+        "signal_kind",
+        "information_cutoff",
+        "strategy_id",
+        "strategy_version",
+        "parameter_hash",
+        "source_sha",
+        "source_dirty",
+        "project_version",
+        "python_version",
+        "dependency_lock_sha256",
+        "result_sha256",
+        "manifest_sha256",
+        "manifest_json",
+        "created_at",
+    } <= manifest_columns
 
 
 def test_existing_signal_schema_is_migrated_in_place(tmp_path):
@@ -85,11 +107,12 @@ def test_existing_signal_schema_is_migrated_in_place(tmp_path):
     database.initialize()
     run = database.latest_signal_run()
 
-    assert database.migration_version() == 6
+    assert database.migration_version() == 7
     assert run["signal_kind"] == "preclose_entry"
     assert run["strategy_version"] == "preclose-v1"
     assert run["information_cutoff"] == run["as_of"]
     assert run["lifecycle_state"] == "published"
+    assert database.get_run_manifest("legacy") is None
 
 
 def test_existing_result_statuses_are_mapped_to_lifecycle_states(tmp_path):
@@ -182,20 +205,46 @@ def test_failure_after_strategy_attribution_migration_rolls_back_and_resumes(tmp
     path = tmp_path / "job-lease-migration-failure.duckdb"
     broken = (
         *MIGRATIONS,
-        Migration(7, "broken_after_ingestion_manifest", ("CREATE TABLE partial (value INTEGER)", "BAD SQL")),
+        Migration(8, "broken_after_run_manifest", ("CREATE TABLE partial (value INTEGER)", "BAD SQL")),
     )
-    fixed = (*MIGRATIONS, Migration(7, "fixed_after_ingestion_manifest", ("CREATE TABLE partial (value INTEGER)",)))
+    fixed = (*MIGRATIONS, Migration(8, "fixed_after_run_manifest", ("CREATE TABLE partial (value INTEGER)",)))
 
+    with duckdb.connect(str(path)) as connection:
+        runner = MigrationRunner(connection)
+        with pytest.raises(duckdb.Error):
+            runner.apply(broken)
+        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 7
+        assert not connection.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name='partial'"
+        ).fetchone()
+        runner.apply(fixed)
+        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 8
+
+
+def test_run_manifest_migration_failure_rolls_back_table_and_recovers(tmp_path):
+    path = tmp_path / "run-manifest-migration-failure.duckdb"
+    broken = (
+        *MIGRATIONS[:-1],
+        Migration(
+            7,
+            "broken_run_manifest",
+            (*MIGRATIONS[-1].statements, "BAD SQL"),
+        ),
+    )
     with duckdb.connect(str(path)) as connection:
         runner = MigrationRunner(connection)
         with pytest.raises(duckdb.Error):
             runner.apply(broken)
         assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 6
         assert not connection.execute(
-            "SELECT 1 FROM information_schema.tables WHERE table_name='partial'"
+            "SELECT 1 FROM information_schema.tables WHERE table_name='run_manifests'"
         ).fetchone()
-        runner.apply(fixed)
+
+        runner.apply(MIGRATIONS)
         assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 7
+        assert connection.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name='run_manifests'"
+        ).fetchone()
 
 
 def test_strategy_attribution_migration_preserves_old_positional_writers(tmp_path):
