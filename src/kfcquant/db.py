@@ -24,10 +24,13 @@ from kfcquant.models import (
     PaperPosition,
     RiskEvent,
     SignalRun,
+    StrategyAttribution,
 )
+from kfcquant.strategy_identity import StrategyParameterSnapshot, canonical_parameter_json, parameter_hash
 
 LOGGER = logging.getLogger(__name__)
 TERMINAL_JOB_STATUSES = frozenset({"success", "degraded", "failed", "missed"})
+LEGACY_PARAMETER_SNAPSHOT = StrategyParameterSnapshot.from_mapping({"legacy_unversioned": True})
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS securities (
@@ -296,6 +299,21 @@ MIGRATIONS = (
                ON CONFLICT (job_run_id) DO NOTHING""",
         ),
     ),
+    Migration(
+        5,
+        "strategy_attributions",
+        (
+            """CREATE TABLE IF NOT EXISTS strategy_attributions (
+               entity_kind VARCHAR NOT NULL,
+               entity_id VARCHAR NOT NULL,
+               strategy_id VARCHAR NOT NULL,
+               strategy_version VARCHAR NOT NULL,
+               parameter_hash VARCHAR NOT NULL,
+               parameter_snapshot_json VARCHAR NOT NULL,
+               PRIMARY KEY (entity_kind, entity_id)
+               )""",
+        ),
+    ),
 )
 
 
@@ -336,12 +354,114 @@ class Database:
     def initialize(self) -> None:
         with self.connect() as connection:
             MigrationRunner(connection).apply(MIGRATIONS)
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                self._backfill_strategy_attributions(connection)
+                connection.execute(
+                    "INSERT INTO paper_account(account_id, initial_cash, cash) "
+                    "SELECT 'default', ?, ? WHERE NOT EXISTS "
+                    "(SELECT 1 FROM paper_account WHERE account_id='default')",
+                    [self.initial_cash, self.initial_cash],
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    @staticmethod
+    def _backfill_strategy_attributions(connection: duckdb.DuckDBPyConnection) -> None:
+        legacy = [LEGACY_PARAMETER_SNAPSHOT.parameter_hash, LEGACY_PARAMETER_SNAPSHOT.canonical_json]
+        connection.execute(
+            """INSERT INTO strategy_attributions
+               SELECT 'signal_run', run_id,
+                      CASE signal_kind
+                        WHEN 'morning_watchlist' THEN 'morning-watchlist'
+                        WHEN 'preclose_entry' THEN 'preclose-entry'
+                        ELSE 'legacy-unknown'
+                      END,
+                      coalesce(strategy_version, 'legacy-v0'), ?, ?
+               FROM signal_runs
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM strategy_attributions a
+                 WHERE a.entity_kind='signal_run' AND a.entity_id=signal_runs.run_id
+               )""",
+            legacy,
+        )
+        connection.execute(
+            """INSERT INTO strategy_attributions
+               SELECT 'paper_order', o.order_id, a.strategy_id, a.strategy_version,
+                      a.parameter_hash, a.parameter_snapshot_json
+               FROM paper_orders o
+               JOIN strategy_attributions a
+                 ON a.entity_kind='signal_run' AND a.entity_id=o.run_id
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM strategy_attributions existing
+                 WHERE existing.entity_kind='paper_order' AND existing.entity_id=o.order_id
+               )"""
+        )
+        connection.execute(
+            """INSERT INTO strategy_attributions
+               SELECT DISTINCT 'paper_position', p.position_id, a.strategy_id, a.strategy_version,
+                      a.parameter_hash, a.parameter_snapshot_json
+               FROM paper_positions p
+               JOIN paper_orders o ON o.position_id=p.position_id
+               JOIN strategy_attributions a
+                 ON a.entity_kind='paper_order' AND a.entity_id=o.order_id
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM strategy_attributions existing
+                 WHERE existing.entity_kind='paper_position' AND existing.entity_id=p.position_id
+               )"""
+        )
+        connection.execute(
+            """INSERT INTO strategy_attributions
+               SELECT 'paper_order', o.order_id, a.strategy_id, a.strategy_version,
+                      a.parameter_hash, a.parameter_snapshot_json
+               FROM paper_orders o
+               JOIN strategy_attributions a
+                 ON a.entity_kind='paper_position' AND a.entity_id=o.position_id
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM strategy_attributions existing
+                 WHERE existing.entity_kind='paper_order' AND existing.entity_id=o.order_id
+               )"""
+        )
+        for entity_kind, table, id_expression in (
+            ("paper_position", "paper_positions", "position_id"),
+            ("paper_order", "paper_orders", "order_id"),
+        ):
             connection.execute(
-                "INSERT INTO paper_account(account_id, initial_cash, cash) "
-                "SELECT 'default', ?, ? WHERE NOT EXISTS "
-                "(SELECT 1 FROM paper_account WHERE account_id='default')",
-                [self.initial_cash, self.initial_cash],
+                f"""INSERT INTO strategy_attributions
+                    SELECT ?, {id_expression}, 'legacy-unknown', 'legacy-v0', ?, ? FROM {table}
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM strategy_attributions a
+                      WHERE a.entity_kind=? AND a.entity_id={table}.{id_expression}
+                    )""",
+                [entity_kind, *legacy, entity_kind],
             )
+        connection.execute(
+            """INSERT INTO strategy_attributions
+               SELECT 'candidate_outcome', c.run_id || ':' || c.ts_code,
+                      a.strategy_id, a.strategy_version, a.parameter_hash, a.parameter_snapshot_json
+               FROM candidate_outcomes c
+               JOIN strategy_attributions a
+                 ON a.entity_kind='signal_run' AND a.entity_id=c.run_id
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM strategy_attributions existing
+                 WHERE existing.entity_kind='candidate_outcome'
+                   AND existing.entity_id=c.run_id || ':' || c.ts_code
+               )"""
+        )
+        connection.execute(
+            """INSERT INTO strategy_attributions
+               SELECT 'opportunity_outcome', o.position_id,
+                      a.strategy_id, a.strategy_version, a.parameter_hash, a.parameter_snapshot_json
+               FROM opportunity_outcomes o
+               JOIN strategy_attributions a
+                 ON a.entity_kind='paper_position' AND a.entity_id=o.position_id
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM strategy_attributions existing
+                 WHERE existing.entity_kind='opportunity_outcome' AND existing.entity_id=o.position_id
+               )"""
+        )
 
     @staticmethod
     def _register_upsert(
@@ -532,7 +652,36 @@ class Database:
         return {row[0] for row in rows}
 
     @staticmethod
-    def _write_signal_run(connection: duckdb.DuckDBPyConnection, run: SignalRun) -> None:
+    def _write_strategy_attribution(
+        connection: duckdb.DuckDBPyConnection,
+        entity_kind: str,
+        entity_id: str,
+        attribution: StrategyAttribution,
+    ) -> None:
+        values = (
+            attribution.strategy_id,
+            attribution.strategy_version,
+            attribution.parameter_hash,
+            canonical_parameter_json(attribution.strategy_parameters),
+        )
+        if parameter_hash(values[3]) != attribution.parameter_hash:
+            raise ValueError("parameter_hash does not match the current strategy parameter snapshot")
+        existing = connection.execute(
+            """SELECT strategy_id, strategy_version, parameter_hash, parameter_snapshot_json
+               FROM strategy_attributions WHERE entity_kind=? AND entity_id=?""",
+            [entity_kind, entity_id],
+        ).fetchone()
+        if existing is not None:
+            if existing != values:
+                raise ValueError(f"strategy attribution is immutable for {entity_kind}:{entity_id}")
+            return
+        connection.execute(
+            """INSERT INTO strategy_attributions VALUES (?, ?, ?, ?, ?, ?)""",
+            [entity_kind, entity_id, *values],
+        )
+
+    @classmethod
+    def _write_signal_run(cls, connection: duckdb.DuckDBPyConnection, run: SignalRun) -> None:
         connection.execute(
             """INSERT OR REPLACE INTO signal_runs (
                run_id, as_of, signal_kind, strategy_version, information_cutoff, data_as_of,
@@ -557,6 +706,7 @@ class Database:
                 json.dumps(run.metadata, ensure_ascii=False, sort_keys=True),
             ],
         )
+        cls._write_strategy_attribution(connection, "signal_run", run.run_id, run)
 
     @staticmethod
     def _write_candidates(
@@ -580,8 +730,8 @@ class Database:
                 ],
             )
 
-    @staticmethod
-    def _write_order(connection: duckdb.DuckDBPyConnection, order: PaperOrder) -> bool:
+    @classmethod
+    def _write_order(cls, connection: duckdb.DuckDBPyConnection, order: PaperOrder) -> bool:
         exists = connection.execute(
             "SELECT 1 FROM paper_orders WHERE run_id=? AND ts_code=? AND side=?",
             [order.run_id, order.ts_code, order.side.value],
@@ -602,6 +752,7 @@ class Database:
                 order.position_id,
             ],
         )
+        cls._write_strategy_attribution(connection, "paper_order", order.order_id, order)
         return True
 
     @staticmethod
@@ -705,7 +856,13 @@ class Database:
 
     def save_signal_run(self, run: SignalRun) -> None:
         with self.connect() as connection:
-            self._write_signal_run(connection, run)
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                self._write_signal_run(connection, run)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
 
     def save_candidates(self, candidates: list[CandidateScore]) -> None:
         with self.connect() as connection:
@@ -720,23 +877,37 @@ class Database:
         conditions: list[str] = []
         params: list[Any] = []
         if on_date:
-            conditions.append("CAST(as_of AS DATE)=?")
+            conditions.append("CAST(r.as_of AS DATE)=?")
             params.append(on_date)
         if signal_kind:
-            conditions.append("signal_kind=?")
+            conditions.append("r.signal_kind=?")
             params.append(signal_kind)
         if not include_non_terminal:
             readable = sorted(state.value for state in READABLE_RESEARCH_RUN_STATES)
-            conditions.append(f"lifecycle_state IN ({', '.join('?' for _ in readable)})")
+            conditions.append(f"r.lifecycle_state IN ({', '.join('?' for _ in readable)})")
             params.extend(readable)
         condition = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         with self.connect(read_only=True) as connection:
             row = connection.execute(
-                f"SELECT * FROM signal_runs {condition} ORDER BY as_of DESC LIMIT 1", params
+                f"""SELECT r.*,
+                           coalesce(a.strategy_id, CASE r.signal_kind
+                             WHEN 'morning_watchlist' THEN 'morning-watchlist'
+                             WHEN 'preclose_entry' THEN 'preclose-entry'
+                             ELSE 'legacy-unknown' END) AS strategy_id,
+                           coalesce(a.parameter_hash, '{LEGACY_PARAMETER_SNAPSHOT.parameter_hash}') AS parameter_hash,
+                           coalesce(a.parameter_snapshot_json,
+                                    '{LEGACY_PARAMETER_SNAPSHOT.canonical_json}') AS parameter_snapshot_json
+                    FROM signal_runs r
+                    LEFT JOIN strategy_attributions a
+                      ON a.entity_kind='signal_run' AND a.entity_id=r.run_id
+                    {condition} ORDER BY r.as_of DESC LIMIT 1""",
+                params,
             ).fetchone()
             if row is None:
                 return None
-            return dict(zip([c[0] for c in connection.description], row, strict=True))
+            result = dict(zip([c[0] for c in connection.description], row, strict=True))
+            result["strategy_parameters"] = json.loads(result.pop("parameter_snapshot_json"))
+            return result
 
     def get_candidates(self, run_id: str, include_blocked: bool = True) -> pd.DataFrame:
         blocked_filter = "" if include_blocked else "AND NOT blocked"
@@ -756,26 +927,44 @@ class Database:
         where = ""
         if not include_non_terminal:
             readable = sorted(state.value for state in READABLE_RESEARCH_RUN_STATES)
-            where = f"WHERE lifecycle_state IN ({', '.join('?' for _ in readable)})"
+            where = f"WHERE r.lifecycle_state IN ({', '.join('?' for _ in readable)})"
             params.extend(readable)
         params.append(limit)
         with self.connect(read_only=True) as connection:
-            return connection.execute(
-                f"SELECT * FROM signal_runs {where} ORDER BY as_of DESC LIMIT ?",
+            frame = connection.execute(
+                f"""SELECT r.*,
+                           coalesce(a.strategy_id, CASE r.signal_kind
+                             WHEN 'morning_watchlist' THEN 'morning-watchlist'
+                             WHEN 'preclose_entry' THEN 'preclose-entry'
+                             ELSE 'legacy-unknown' END) AS strategy_id,
+                           coalesce(a.parameter_hash, '{LEGACY_PARAMETER_SNAPSHOT.parameter_hash}') AS parameter_hash,
+                           coalesce(a.parameter_snapshot_json,
+                                    '{LEGACY_PARAMETER_SNAPSHOT.canonical_json}') AS parameter_snapshot_json
+                    FROM signal_runs r
+                    LEFT JOIN strategy_attributions a
+                      ON a.entity_kind='signal_run' AND a.entity_id=r.run_id
+                    {where} ORDER BY r.as_of DESC LIMIT ?""",
                 params,
             ).fetchdf()
+        return self._decode_strategy_frame(frame)
 
     def get_cash(self) -> float:
         with self.connect(read_only=True) as connection:
             return float(connection.execute("SELECT cash FROM paper_account WHERE account_id='default'").fetchone()[0])
 
     def get_open_positions(self) -> pd.DataFrame:
-        with self.connect(read_only=True) as connection:
-            return connection.execute("SELECT * FROM paper_positions WHERE status='open' ORDER BY opened_at").fetchdf()
+        return self.table_with_strategy("paper_positions").query("status == 'open'").sort_values("opened_at")
 
     def save_order(self, order: PaperOrder) -> bool:
         with self.connect() as connection:
-            return self._write_order(connection, order)
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                created = self._write_order(connection, order)
+                connection.execute("COMMIT")
+                return created
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
 
     def proposed_orders(self, run_id: str | None = None) -> pd.DataFrame:
         condition = "status='proposed'"
@@ -784,9 +973,15 @@ class Database:
             condition += " AND run_id=?"
             params.append(run_id)
         with self.connect(read_only=True) as connection:
-            return connection.execute(
-                f"SELECT * FROM paper_orders WHERE {condition} ORDER BY created_at", params
+            frame = connection.execute(
+                f"""SELECT e.*, a.strategy_id, a.strategy_version, a.parameter_hash,
+                           a.parameter_snapshot_json
+                    FROM paper_orders e JOIN strategy_attributions a
+                      ON a.entity_kind='paper_order' AND a.entity_id=e.order_id
+                    WHERE {condition} ORDER BY created_at""",
+                params,
             ).fetchdf()
+        return self._decode_strategy_frame(frame)
 
     def reject_order(self, order_id: str, reason: str) -> None:
         with self.connect() as connection:
@@ -843,6 +1038,12 @@ class Database:
                         position.realized_pnl,
                     ],
                 )
+                self._write_strategy_attribution(
+                    connection,
+                    "paper_position",
+                    position.position_id,
+                    position,
+                )
                 connection.execute(
                     "UPDATE paper_account SET cash=cash-?, updated_at=now() WHERE account_id='default'",
                     [cash_required],
@@ -864,12 +1065,18 @@ class Database:
             connection.begin()
             try:
                 row = connection.execute(
-                    "SELECT * FROM paper_positions WHERE position_id=? AND status='open'", [position_id]
+                    """SELECT p.*, a.strategy_id, a.strategy_version, a.parameter_hash,
+                              a.parameter_snapshot_json
+                       FROM paper_positions p JOIN strategy_attributions a
+                         ON a.entity_kind='paper_position' AND a.entity_id=p.position_id
+                       WHERE p.position_id=? AND p.status='open'""",
+                    [position_id],
                 ).fetchone()
                 if row is None:
                     raise ValueError("open position not found")
                 columns = [c[0] for c in connection.description]
                 current = dict(zip(columns, row, strict=True))
+                current["strategy_parameters"] = json.loads(current.pop("parameter_snapshot_json"))
                 if connection.execute("SELECT 1 FROM paper_fills WHERE order_id=?", [fill.order_id]).fetchone():
                     connection.rollback()
                     return PaperPosition.model_validate(current)
@@ -918,8 +1125,10 @@ class Database:
 
     def save_outcome(self, outcome: OpportunityOutcome) -> None:
         with self.connect() as connection:
-            connection.execute(
-                """INSERT INTO opportunity_outcomes (
+            connection.begin()
+            try:
+                connection.execute(
+                    """INSERT INTO opportunity_outcomes (
                    outcome_id, position_id, ts_code, entry_date, first_day_hit, five_day_hit,
                    holding_days, net_return, max_favorable_excursion, max_adverse_excursion, recorded_at
                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -933,26 +1142,38 @@ class Database:
                      net_return=excluded.net_return,
                      max_favorable_excursion=excluded.max_favorable_excursion,
                      max_adverse_excursion=excluded.max_adverse_excursion,
-                     recorded_at=excluded.recorded_at""",
-                [
-                    outcome.outcome_id,
+                   recorded_at=excluded.recorded_at""",
+                    [
+                        outcome.outcome_id,
+                        outcome.position_id,
+                        outcome.ts_code,
+                        outcome.entry_date,
+                        outcome.first_day_hit,
+                        outcome.five_day_hit,
+                        outcome.holding_days,
+                        outcome.net_return,
+                        outcome.max_favorable_excursion,
+                        outcome.max_adverse_excursion,
+                        outcome.recorded_at,
+                    ],
+                )
+                self._write_strategy_attribution(
+                    connection,
+                    "opportunity_outcome",
                     outcome.position_id,
-                    outcome.ts_code,
-                    outcome.entry_date,
-                    outcome.first_day_hit,
-                    outcome.five_day_hit,
-                    outcome.holding_days,
-                    outcome.net_return,
-                    outcome.max_favorable_excursion,
-                    outcome.max_adverse_excursion,
-                    outcome.recorded_at,
-                ],
-            )
+                    outcome,
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def save_candidate_outcome(self, outcome: CandidateOutcome) -> None:
         with self.connect() as connection:
-            connection.execute(
-                """INSERT INTO candidate_outcomes (
+            connection.begin()
+            try:
+                connection.execute(
+                    """INSERT INTO candidate_outcomes (
                    outcome_id, run_id, ts_code, signal_kind, status, baseline_at,
                    baseline_price, target_price, hit_at, max_favorable_excursion,
                    max_adverse_excursion, reason, evaluated_at
@@ -968,31 +1189,48 @@ class Database:
                      max_favorable_excursion=excluded.max_favorable_excursion,
                      max_adverse_excursion=excluded.max_adverse_excursion,
                      reason=excluded.reason,
-                     evaluated_at=excluded.evaluated_at""",
-                [
-                    outcome.outcome_id,
-                    outcome.run_id,
-                    outcome.ts_code,
-                    outcome.signal_kind.value,
-                    outcome.status.value,
-                    outcome.baseline_at,
-                    outcome.baseline_price,
-                    outcome.target_price,
-                    outcome.hit_at,
-                    outcome.max_favorable_excursion,
-                    outcome.max_adverse_excursion,
-                    outcome.reason,
-                    outcome.evaluated_at,
-                ],
-            )
+                   evaluated_at=excluded.evaluated_at""",
+                    [
+                        outcome.outcome_id,
+                        outcome.run_id,
+                        outcome.ts_code,
+                        outcome.signal_kind.value,
+                        outcome.status.value,
+                        outcome.baseline_at,
+                        outcome.baseline_price,
+                        outcome.target_price,
+                        outcome.hit_at,
+                        outcome.max_favorable_excursion,
+                        outcome.max_adverse_excursion,
+                        outcome.reason,
+                        outcome.evaluated_at,
+                    ],
+                )
+                self._write_strategy_attribution(
+                    connection,
+                    "candidate_outcome",
+                    f"{outcome.run_id}:{outcome.ts_code}",
+                    outcome,
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def candidate_outcomes(self, signal_kind: str | None = None) -> pd.DataFrame:
-        where = "WHERE signal_kind=?" if signal_kind else ""
+        where = "WHERE e.signal_kind=?" if signal_kind else ""
         params = [signal_kind] if signal_kind else []
         with self.connect(read_only=True) as connection:
-            return connection.execute(
-                f"SELECT * FROM candidate_outcomes {where} ORDER BY evaluated_at DESC", params
+            frame = connection.execute(
+                f"""SELECT e.*, a.strategy_id, a.strategy_version, a.parameter_hash,
+                           a.parameter_snapshot_json
+                    FROM candidate_outcomes e JOIN strategy_attributions a
+                      ON a.entity_kind='candidate_outcome'
+                     AND a.entity_id=e.run_id || ':' || e.ts_code
+                    {where} ORDER BY e.evaluated_at DESC""",
+                params,
             ).fetchdf()
+        return self._decode_strategy_frame(frame)
 
     def latest_job(self, job_name: str | None = None) -> dict[str, Any] | None:
         where = "WHERE job_name=?" if job_name else ""
@@ -1192,8 +1430,40 @@ class Database:
             "job_runs",
             "job_leases",
             "reports",
+            "strategy_attributions",
         }
         if name not in allowed:
             raise ValueError(f"table not allowed: {name}")
         with self.connect(read_only=True) as connection:
             return connection.execute(f"SELECT * FROM {name} ORDER BY 1 DESC LIMIT ?", [limit]).fetchdf()
+
+    @staticmethod
+    def _decode_strategy_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        if "parameter_snapshot_json" not in frame.columns:
+            return frame
+        decoded = frame.copy()
+        decoded["strategy_parameters"] = decoded["parameter_snapshot_json"].map(json.loads)
+        return decoded.drop(columns=["parameter_snapshot_json"])
+
+    def table_with_strategy(self, name: str, limit: int = 1000) -> pd.DataFrame:
+        attributed = {
+            "signal_runs": ("signal_run", "e.run_id"),
+            "paper_orders": ("paper_order", "e.order_id"),
+            "paper_positions": ("paper_position", "e.position_id"),
+            "candidate_outcomes": ("candidate_outcome", "e.run_id || ':' || e.ts_code"),
+            "opportunity_outcomes": ("opportunity_outcome", "e.position_id"),
+        }
+        if name not in attributed:
+            raise ValueError(f"strategy attribution not supported for table: {name}")
+        entity_kind, entity_id = attributed[name]
+        strategy_version = "" if name == "signal_runs" else ", a.strategy_version"
+        with self.connect(read_only=True) as connection:
+            frame = connection.execute(
+                f"""SELECT e.*, a.strategy_id{strategy_version}, a.parameter_hash,
+                           a.parameter_snapshot_json
+                    FROM {name} e JOIN strategy_attributions a
+                      ON a.entity_kind=? AND a.entity_id={entity_id}
+                    ORDER BY 1 DESC LIMIT ?""",
+                [entity_kind, limit],
+            ).fetchdf()
+        return self._decode_strategy_frame(frame)

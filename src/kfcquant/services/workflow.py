@@ -354,9 +354,9 @@ class Workflow:
         trading_day = self.database.is_trading_day(as_of.date())
         if not trading_day:
             run = SignalRun(
+                **strategy.identity.attribution_fields(),
                 as_of=as_of,
                 signal_kind=SignalKind.PRECLOSE_ENTRY,
-                strategy_version=strategy.identity.version,
                 information_cutoff=as_of,
                 status=RunStatus.MISSED,
                 data_fresh=False,
@@ -374,9 +374,9 @@ class Workflow:
             return run
         if not window_ok and not research_outside_window:
             run = SignalRun(
+                **strategy.identity.attribution_fields(),
                 as_of=as_of,
                 signal_kind=SignalKind.PRECLOSE_ENTRY,
-                strategy_version=strategy.identity.version,
                 information_cutoff=as_of,
                 status=RunStatus.MISSED,
                 data_fresh=False,
@@ -394,9 +394,9 @@ class Workflow:
             return run
         try:
             draft = SignalRun(
+                **strategy.identity.attribution_fields(),
                 as_of=as_of,
                 signal_kind=SignalKind.PRECLOSE_ENTRY,
-                strategy_version=strategy.identity.version,
                 information_cutoff=as_of,
                 status=RunStatus.RUNNING,
                 lifecycle_state=ResearchRunState.CREATED,
@@ -526,9 +526,9 @@ class Workflow:
                 else f"不在{self.settings.schedule.morning_window.describe()}窗口内"
             )
             run = SignalRun(
+                **strategy.identity.attribution_fields(),
                 as_of=as_of,
                 signal_kind=SignalKind.MORNING_WATCHLIST,
-                strategy_version=strategy.identity.version,
                 information_cutoff=as_of,
                 status=RunStatus.MISSED,
                 data_fresh=False,
@@ -546,9 +546,9 @@ class Workflow:
             return run
         try:
             draft = SignalRun(
+                **strategy.identity.attribution_fields(),
                 as_of=as_of,
                 signal_kind=SignalKind.MORNING_WATCHLIST,
-                strategy_version=strategy.identity.version,
                 information_cutoff=as_of,
                 status=RunStatus.RUNNING,
                 lifecycle_state=ResearchRunState.CREATED,

@@ -12,6 +12,7 @@ from kfcops.store import OpsStore
 from kfcquant.config import SHANGHAI_TZ
 from kfcquant.db import Database, JobAlreadyRunningError, JobLeaseLostError
 from kfcquant.models import CandidateOutcome, EvaluationStatus, OpportunityOutcome, SignalKind
+from tests.conftest import strategy_attribution
 from tests.test_ops import ops_settings
 
 
@@ -113,6 +114,7 @@ def test_atomic_outcome_and_report_upserts_preserve_old_rows_on_conflict(setting
     at = datetime(2026, 8, 10, 20, 30, tzinfo=SHANGHAI_TZ)
 
     opportunity_a = OpportunityOutcome(
+        **strategy_attribution(),
         outcome_id="op-a",
         position_id="position-a",
         ts_code="600000.SH",
@@ -139,6 +141,7 @@ def test_atomic_outcome_and_report_upserts_preserve_old_rows_on_conflict(setting
     assert updated_opportunity["net_return"] == pytest.approx(0.1)
 
     candidate_a = CandidateOutcome(
+        **strategy_attribution(),
         outcome_id="candidate-a",
         run_id="run-a",
         ts_code="600000.SH",

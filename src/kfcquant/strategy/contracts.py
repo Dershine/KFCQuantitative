@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, runtime_checkable
@@ -8,21 +7,7 @@ from typing import Protocol, runtime_checkable
 import pandas as pd
 
 from kfcquant.models import CandidateScore, SignalKind
-
-_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-
-
-@dataclass(frozen=True, slots=True)
-class StrategyIdentity:
-    """Stable strategy identity available before persistent attribution is added."""
-
-    strategy_id: str
-    version: str
-
-    def __post_init__(self) -> None:
-        for field_name, value in (("strategy_id", self.strategy_id), ("version", self.version)):
-            if not _IDENTIFIER.fullmatch(value):
-                raise ValueError(f"{field_name} must be a 1-64 character strategy identifier")
+from kfcquant.strategy_identity import StrategyIdentity
 
 
 @dataclass(frozen=True, slots=True)

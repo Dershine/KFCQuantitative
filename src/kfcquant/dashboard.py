@@ -169,7 +169,7 @@ with tabs[2]:
         st.dataframe(display, width="stretch", hide_index=True)
 
 with tabs[3]:
-    orders = safe_table("paper_orders")
+    orders = safe_read(lambda: database.table_with_strategy("paper_orders"), pd.DataFrame())
     fills = safe_table("paper_fills")
     st.subheader("订单")
     st.dataframe(orders, width="stretch", hide_index=True)
@@ -196,7 +196,7 @@ with tabs[4]:
             if not frame.empty:
                 st.dataframe(frame.head(50), width="stretch", hide_index=True)
     st.subheader("影子组合交易评估")
-    outcomes = safe_table("opportunity_outcomes")
+    outcomes = safe_read(lambda: database.table_with_strategy("opportunity_outcomes"), pd.DataFrame())
     if outcomes.empty:
         st.info("尚无已完成持仓。概率校准至少需要60个交易日的前向样本。")
     else:

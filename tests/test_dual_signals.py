@@ -10,7 +10,7 @@ from kfcquant.models import CandidateScore, FactorBreakdown, RunStatus, SignalKi
 from kfcquant.services.evaluation import CandidateEvaluationService
 from kfcquant.services.scoring import ScoringService
 from kfcquant.services.workflow import Workflow
-from tests.conftest import make_daily, make_securities
+from tests.conftest import make_daily, make_securities, strategy_attribution
 from tests.test_workflow import FakeLive, FakeLLM, FakeMarket
 
 
@@ -95,9 +95,9 @@ def test_missing_minute_bars_are_not_counted_as_a_miss(settings):
     database = Database(settings.database_path)
     database.initialize()
     run = SignalRun(
+        **strategy_attribution("morning-watchlist", "morning-v1"),
         as_of=at,
         signal_kind=SignalKind.MORNING_WATCHLIST,
-        strategy_version="morning-v1",
         status=RunStatus.SUCCESS,
         data_fresh=True,
         official_news_healthy=True,

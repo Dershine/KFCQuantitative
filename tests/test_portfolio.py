@@ -14,6 +14,7 @@ from kfcquant.models import (
     SignalRun,
 )
 from kfcquant.services.portfolio import FeeModel, PortfolioService
+from tests.conftest import strategy_attribution
 
 
 class FakeLive:
@@ -52,6 +53,7 @@ def test_buy_fill_uses_incremental_vwap_and_is_idempotent(settings):
     service = PortfolioService(database, settings, live)
     signal_at = datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ)
     run = SignalRun(
+        **strategy_attribution(),
         run_id="run-buy",
         as_of=signal_at,
         status=RunStatus.SUCCESS,
@@ -112,6 +114,7 @@ def test_same_bar_stop_has_priority_and_t_plus_one(settings):
     service = PortfolioService(database, settings, live)
     entry_at = datetime(2026, 8, 10, 14, 45, tzinfo=SHANGHAI_TZ)
     run = SignalRun(
+        **strategy_attribution(),
         run_id="entry",
         as_of=entry_at - timedelta(minutes=5),
         status=RunStatus.SUCCESS,
@@ -163,6 +166,7 @@ def test_buy_is_rejected_without_interval_volume(settings):
     service = PortfolioService(database, settings, FakeLive())
     signal_at = datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ)
     run = SignalRun(
+        **strategy_attribution(),
         run_id="no-volume",
         as_of=signal_at,
         status=RunStatus.SUCCESS,
@@ -212,6 +216,7 @@ def test_missing_today_signal_does_not_force_score_exit(settings):
     service = PortfolioService(database, settings, live)
     entry_at = datetime(2026, 8, 10, 14, 45, tzinfo=SHANGHAI_TZ)
     run = SignalRun(
+        **strategy_attribution(),
         run_id="old-signal",
         as_of=entry_at - timedelta(minutes=5),
         status=RunStatus.SUCCESS,
@@ -253,6 +258,7 @@ def test_order_reserve_count_uses_shared_selection_policy(settings):
     service = PortfolioService(database, configured, FakeLive())
     signal_at = datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ)
     run = SignalRun(
+        **strategy_attribution(),
         run_id="selection-limit",
         as_of=signal_at,
         status=RunStatus.SUCCESS,

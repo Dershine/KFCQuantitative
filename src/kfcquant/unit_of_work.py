@@ -16,6 +16,7 @@ from kfcquant.models import (
     RunStatus,
     SignalRun,
 )
+from kfcquant.strategy_identity import canonical_parameter_json
 
 LOGGER = logging.getLogger(__name__)
 
@@ -65,6 +66,23 @@ class DuckDBResearchRunUnitOfWork:
             raise ValueError("every candidate must belong to the published run")
         if any(order.run_id != run.run_id for order in orders):
             raise ValueError("every order must belong to the published run")
+        run_attribution = (
+            run.strategy_id,
+            run.strategy_version,
+            run.parameter_hash,
+            canonical_parameter_json(run.strategy_parameters),
+        )
+        if any(
+            (
+                order.strategy_id,
+                order.strategy_version,
+                order.parameter_hash,
+                canonical_parameter_json(order.strategy_parameters),
+            )
+            != run_attribution
+            for order in orders
+        ):
+            raise ValueError("every order must retain the published run strategy attribution")
         if job.status != run.status.value:
             raise ValueError("job completion status must match the research run result")
         if run.lifecycle_state != ResearchRunState.PUBLISHED:
@@ -98,13 +116,25 @@ class DuckDBResearchRunUnitOfWork:
         job: JobCompletion,
     ) -> bool:
         stored = connection.execute(
-            """SELECT status, lifecycle_state, tradable, candidate_count
-               FROM signal_runs WHERE run_id=?""",
+            """SELECT r.status, r.lifecycle_state, r.tradable, r.candidate_count,
+                      a.strategy_id, a.strategy_version, a.parameter_hash, a.parameter_snapshot_json
+               FROM signal_runs r JOIN strategy_attributions a
+                 ON a.entity_kind='signal_run' AND a.entity_id=r.run_id
+               WHERE r.run_id=?""",
             [run.run_id],
         ).fetchone()
         if stored is None:
             return False
-        expected_run = (run.status.value, run.lifecycle_state.value, run.tradable, run.candidate_count)
+        expected_run = (
+            run.status.value,
+            run.lifecycle_state.value,
+            run.tradable,
+            run.candidate_count,
+            run.strategy_id,
+            run.strategy_version,
+            run.parameter_hash,
+            canonical_parameter_json(run.strategy_parameters),
+        )
         stored_candidates = connection.execute(
             "SELECT ts_code, rank, blocked, opportunity_score FROM candidate_scores WHERE run_id=? ORDER BY ts_code",
             [run.run_id],
@@ -114,11 +144,25 @@ class DuckDBResearchRunUnitOfWork:
             for candidate in candidates
         )
         stored_orders = connection.execute(
-            "SELECT order_id, ts_code, side, status, target_value FROM paper_orders WHERE run_id=? ORDER BY order_id",
+            """SELECT o.order_id, o.ts_code, o.side, o.status, o.target_value,
+                      a.strategy_id, a.strategy_version, a.parameter_hash, a.parameter_snapshot_json
+               FROM paper_orders o JOIN strategy_attributions a
+                 ON a.entity_kind='paper_order' AND a.entity_id=o.order_id
+               WHERE o.run_id=? ORDER BY o.order_id""",
             [run.run_id],
         ).fetchall()
         expected_orders = sorted(
-            (order.order_id, order.ts_code, order.side.value, order.status.value, order.target_value)
+            (
+                order.order_id,
+                order.ts_code,
+                order.side.value,
+                order.status.value,
+                order.target_value,
+                order.strategy_id,
+                order.strategy_version,
+                order.parameter_hash,
+                canonical_parameter_json(order.strategy_parameters),
+            )
             for order in orders
         )
         stored_job = connection.execute(

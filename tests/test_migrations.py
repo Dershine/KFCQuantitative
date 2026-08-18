@@ -28,12 +28,24 @@ def test_empty_database_initialization_and_repeat_are_idempotent(tmp_path):
         ).fetchone()
         signal_columns = {row[1] for row in connection.execute("PRAGMA table_info('signal_runs')").fetchall()}
 
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5]
     assert account == (123_456.0, 123_456.0)
     assert {"signal_kind", "strategy_version", "information_cutoff", "data_as_of", "lifecycle_state"} <= signal_columns
     with duckdb.connect(str(path), read_only=True) as connection:
         lease_columns = {row[1] for row in connection.execute("PRAGMA table_info('job_leases')").fetchall()}
     assert {"job_run_id", "heartbeat_at", "lease_expires_at", "recovery_count"} <= lease_columns
+    with duckdb.connect(str(path), read_only=True) as connection:
+        attribution_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info('strategy_attributions')").fetchall()
+        }
+    assert {
+        "entity_kind",
+        "entity_id",
+        "strategy_id",
+        "strategy_version",
+        "parameter_hash",
+        "parameter_snapshot_json",
+    } <= attribution_columns
 
 
 def test_existing_signal_schema_is_migrated_in_place(tmp_path):
@@ -57,7 +69,7 @@ def test_existing_signal_schema_is_migrated_in_place(tmp_path):
     database.initialize()
     run = database.latest_signal_run()
 
-    assert database.migration_version() == 4
+    assert database.migration_version() == 5
     assert run["signal_kind"] == "preclose_entry"
     assert run["strategy_version"] == "preclose-v1"
     assert run["information_cutoff"] == run["as_of"]
@@ -150,24 +162,104 @@ def test_job_lease_migration_recovers_legacy_running_job_and_preserves_old_write
     assert database.latest_job("sync-calendar")["status"] == "success"
 
 
-def test_failure_after_job_lease_migration_rolls_back_and_resumes(tmp_path):
+def test_failure_after_strategy_attribution_migration_rolls_back_and_resumes(tmp_path):
     path = tmp_path / "job-lease-migration-failure.duckdb"
     broken = (
         *MIGRATIONS,
-        Migration(5, "broken_after_job_leases", ("CREATE TABLE partial (value INTEGER)", "BAD SQL")),
+        Migration(6, "broken_after_strategy_attribution", ("CREATE TABLE partial (value INTEGER)", "BAD SQL")),
     )
-    fixed = (*MIGRATIONS, Migration(5, "fixed_after_job_leases", ("CREATE TABLE partial (value INTEGER)",)))
+    fixed = (*MIGRATIONS, Migration(6, "fixed_after_strategy_attribution", ("CREATE TABLE partial (value INTEGER)",)))
 
     with duckdb.connect(str(path)) as connection:
         runner = MigrationRunner(connection)
         with pytest.raises(duckdb.Error):
             runner.apply(broken)
-        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 4
+        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 5
         assert not connection.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_name='partial'"
         ).fetchone()
         runner.apply(fixed)
-        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 5
+        assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 6
+
+
+def test_strategy_attribution_migration_preserves_old_positional_writers(tmp_path):
+    path = tmp_path / "strategy-attribution-compatible.duckdb"
+    database = Database(path)
+    database.initialize()
+
+    with duckdb.connect(str(path)) as connection:
+        connection.execute(
+            """INSERT INTO signal_runs (
+               run_id, as_of, signal_kind, strategy_version, information_cutoff, data_as_of,
+               status, data_fresh, official_news_healthy, mainstream_news_healthy,
+               tradable, message, candidate_count, metadata_json
+               ) VALUES ('old-run', '2026-08-10 14:40:00+08:00', 'preclose_entry',
+                         'preclose-v1', '2026-08-10 14:40:00+08:00', NULL,
+                         'success', true, true, true, true, 'ok', 0, '{}')"""
+        )
+        connection.execute(
+            """INSERT INTO paper_orders VALUES (
+               'old-order', 'old-run', '600000.SH', 'buy', 'filled',
+               '2026-08-10 14:40:00+08:00', 10000, 'legacy', 'old-position'
+               )"""
+        )
+        connection.execute(
+            """INSERT INTO paper_positions VALUES (
+               'old-position', '600000.SH', '2026-08-10 14:45:00+08:00', '2026-08-10',
+               1000, 10, 10.01, 5, 'open', NULL, NULL, NULL, NULL
+               )"""
+        )
+        connection.execute(
+            """INSERT INTO candidate_outcomes VALUES (
+               'old-candidate-outcome', 'old-run', '600000.SH', 'preclose_entry', 'miss',
+               NULL, NULL, NULL, NULL, NULL, NULL, 'legacy', '2026-08-11 15:00:00+08:00'
+               )"""
+        )
+        connection.execute(
+            """INSERT INTO opportunity_outcomes VALUES (
+               'old-opportunity-outcome', 'old-position', '600000.SH', '2026-08-10',
+               false, false, 1, 0, NULL, NULL, '2026-08-11 15:00:00+08:00'
+               )"""
+        )
+
+    database.initialize()
+
+    assert database.table_with_strategy("paper_orders").iloc[0]["strategy_id"] == "preclose-entry"
+    assert database.table_with_strategy("paper_positions").iloc[0]["strategy_id"] == "preclose-entry"
+    assert database.table_with_strategy("candidate_outcomes").iloc[0]["strategy_id"] == "preclose-entry"
+    assert database.table_with_strategy("opportunity_outcomes").iloc[0]["strategy_id"] == "preclose-entry"
+
+
+def test_strategy_attribution_backfill_failure_rolls_back_and_recovers(tmp_path, monkeypatch):
+    path = tmp_path / "strategy-attribution-backfill-recovery.duckdb"
+    database = Database(path)
+    database.initialize()
+    with duckdb.connect(str(path)) as connection:
+        connection.execute(
+            """INSERT INTO signal_runs (
+               run_id, as_of, signal_kind, strategy_version, information_cutoff, data_as_of,
+               status, data_fresh, official_news_healthy, mainstream_news_healthy,
+               tradable, message, candidate_count, metadata_json
+               ) VALUES ('rollback-run', '2026-08-10 14:40:00+08:00', 'preclose_entry',
+                         'preclose-v1', '2026-08-10 14:40:00+08:00', NULL,
+                         'success', true, true, true, true, 'ok', 0, '{}')"""
+        )
+
+    original = Database._backfill_strategy_attributions
+
+    def fail_after_backfill(connection):
+        original(connection)
+        raise RuntimeError("injected backfill failure")
+
+    monkeypatch.setattr(Database, "_backfill_strategy_attributions", staticmethod(fail_after_backfill))
+    with pytest.raises(RuntimeError, match="injected"):
+        database.initialize()
+    assert database.table("strategy_attributions").query("entity_id == 'rollback-run'").empty
+
+    monkeypatch.setattr(Database, "_backfill_strategy_attributions", staticmethod(original))
+    database.initialize()
+    recovered = database.table("strategy_attributions").query("entity_id == 'rollback-run'").iloc[0]
+    assert recovered["strategy_id"] == "preclose-entry"
 
 
 def test_database_access_uses_shared_cross_process_lock(tmp_path):

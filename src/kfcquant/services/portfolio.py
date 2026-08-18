@@ -48,6 +48,10 @@ class FeeModel:
             total_cash_change=-total,
         )
         position = PaperPosition(
+            strategy_id=order.strategy_id,
+            strategy_version=order.strategy_version,
+            parameter_hash=order.parameter_hash,
+            strategy_parameters=order.strategy_parameters,
             ts_code=order.ts_code,
             opened_at=at,
             opened_trade_date=at.date(),
@@ -113,6 +117,10 @@ class PortfolioService:
             if candidate.ts_code in held:
                 continue
             order = PaperOrder(
+                strategy_id=run.strategy_id,
+                strategy_version=run.strategy_version,
+                parameter_hash=run.parameter_hash,
+                strategy_parameters=run.strategy_parameters,
                 run_id=run.run_id,
                 ts_code=candidate.ts_code,
                 side=OrderSide.BUY,
@@ -200,6 +208,10 @@ class PortfolioService:
     def _close_position(self, position: PaperPosition, raw_price: float, at: datetime, reason: str) -> PaperFill:
         run_id = f"monitor-{at.strftime('%Y%m%d-%H%M')}"
         order = PaperOrder(
+            strategy_id=position.strategy_id,
+            strategy_version=position.strategy_version,
+            parameter_hash=position.parameter_hash,
+            strategy_parameters=position.strategy_parameters,
             run_id=run_id,
             ts_code=position.ts_code,
             side=OrderSide.SELL,
@@ -223,6 +235,10 @@ class PortfolioService:
         hit = reason == "take_profit"
         self.database.save_outcome(
             OpportunityOutcome(
+                strategy_id=position.strategy_id,
+                strategy_version=position.strategy_version,
+                parameter_hash=position.parameter_hash,
+                strategy_parameters=position.strategy_parameters,
                 position_id=position.position_id,
                 ts_code=position.ts_code,
                 entry_date=position.opened_trade_date,

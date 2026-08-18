@@ -7,10 +7,12 @@ import pytest
 from kfcquant.config import SHANGHAI_TZ
 from kfcquant.db import Database
 from kfcquant.models import CandidateScore, FactorBreakdown, ResearchRunState, RunStatus, SignalRun
+from tests.conftest import strategy_attribution
 
 
 def make_run(state: ResearchRunState = ResearchRunState.CREATED) -> SignalRun:
     return SignalRun(
+        **strategy_attribution(),
         run_id="state-machine",
         as_of=datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ),
         status=RunStatus.RUNNING,
@@ -104,6 +106,7 @@ def test_business_queries_hide_non_published_runs(settings):
 )
 def test_legacy_result_status_infers_compatible_lifecycle(status, expected_state):
     run = SignalRun(
+        **strategy_attribution(),
         as_of=datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ),
         status=status,
         data_fresh=False,

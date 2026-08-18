@@ -8,9 +8,9 @@
 |---|---|
 | 文档状态 | Active / 长期维护 |
 | 首次建立 | 2026-08-15 |
-| 最近复核 | 2026-08-15 |
+| 最近复核 | 2026-08-18 |
 | 项目版本基线 | `0.2.0` |
-| 源码基线 | `5bc5fc27c5f0fb5f59f9fbc91313dc9ed0d5be70`（工作区） |
+| 源码基线 | `80bbc91678dd5f5a1489f9a5434639091bda2ca4`（工作区） |
 | 适用范围 | Research Service、Operations Manager、数据与部署基础设施 |
 | 目标读者 | 项目维护者、策略开发者、代码审查者、部署维护者 |
 | 领域语言 | 以根目录 `CONTEXT.md` 为准 |
@@ -97,7 +97,7 @@ KFCQuant 当前是一个面向个人使用、强调可审计和安全降级的 A
 | 影子组合一致性 | 中高 | 买卖成交具备事务和幂等保护 |
 | 部署与回滚 | 较高 | 具备CI验证、备份、健康检查和自动回滚 |
 | 单策略可维护性 | 中高 | 股票池、特征、技术评分、资讯风险和选择Policy已分离并独立测试 |
-| 多策略演进 | 中低 | Strategy契约与Registry已建立，归属、参数和共享内核仍待完成 |
+| 多策略演进 | 中高 | Strategy契约、Registry、归属与参数身份已建立；Golden Snapshot仍待完成 |
 | 严格可复现性 | 偏低 | 缺少完整Run Manifest、数据版本和Prompt版本 |
 | 故障恢复 | 高 | Signal发布已整体原子化；Job具备续租、竞争隔离、过期回收和迟到写入隔离 |
 | 可观测性 | 中等 | 有Job、心跳和健康状态，缺少结构化指标与告警 |
@@ -363,6 +363,7 @@ flowchart TD
 - Job租约独立存放于`job_leases`，保持旧版八列`job_runs`写入兼容；有效租约阻止同名竞争与部署，过期任务可在Scheduler启动时幂等回收。
 - Morning与Pre-close通过统一Strategy契约和Registry解析；现有`strategy_version_*`配置由内置Strategy Identity承接，持久化Schema保持不变；两者共享独立`UniversePolicy`并分别消费版本化`FeatureSchema`，股票池与特征层不接收新闻、风险或排序输入。
 - `ScoreModel`只接收版本化特征并产生确定性技术分；`RiskPolicy`独立解释资讯软调整与证据硬阻断，`SelectionPolicy`统一最低分、blocked优先级、稳定排序、候选上限和Top N消费语义；`ScoringService`保留为兼容编排门面。
+- `StrategyIdentity`包含稳定`strategy_id`、版本和规范化参数快照Hash；Run、买卖Order、Position、Candidate Outcome与Opportunity Outcome通过`strategy_attributions`旁表持久化同一归属。Schema v5不扩宽既有业务表，旧版本positional writer仍可写入，新版本初始化会事务性幂等回填明确的legacy归属。
 
 ### 4.6 部署拓扑
 
@@ -380,13 +381,14 @@ flowchart TD
 
 ## 5. 当前工程质量基线
 
-基于2026-08-15本地验证：
+基于2026-08-18本地验证：
 
 | 检查 | 结果 |
 |---|---|
 | Ruff | 通过 |
-| Pytest | 126项通过 |
-| 总覆盖率 | 73%（含分支） |
+| Pytest | 139项通过 |
+| 总覆盖率 | 74%（含分支） |
+| `strategy_identity.py` | 100%（含分支） |
 | `strategy/*` | 100%语句与分支覆盖 |
 | `services/scoring.py` | 95%（含分支） |
 | `policies.py` | 89%（含分支；本阶段Selection分支已覆盖） |
@@ -463,7 +465,7 @@ flowchart TD
 | TD-003 | HIGH | 迁移逻辑集中在`initialize()`中的即席ALTER | 迁移顺序、失败恢复和兼容边界不清晰 | M1 | `DONE` |
 | TD-004 | HIGH | 时间窗口、Top N和部分规则分散硬编码 | 配置漂移和行为不一致 | M1 | `DONE` |
 | TD-005 | HIGH | Strategy不是一等接口 | 多策略、实验和Replay需要修改核心编排 | M2 | `DONE` |
-| TD-006 | HIGH | 策略版本只是自由字符串 | 无法严格绑定代码、参数和因子定义 | M2 | `NOT_STARTED` |
+| TD-006 | HIGH | 策略版本曾只是自由字符串 | 参数与Feature Schema已由稳定Hash绑定；源码SHA仍待Run Manifest贯穿 | M2/M3 | `IN_PROGRESS` |
 | TD-007 | HIGH | 缺少完整Run Manifest和数据快照引用 | 不能严格重放历史Signal Run | M3 | `NOT_STARTED` |
 | TD-008 | HIGH | Provider以无Schema的DataFrame作为跨层契约 | 外部字段、类型或单位漂移可能静默污染结果 | M3 | `NOT_STARTED` |
 | TD-009 | HIGH | 实时与未来历史回放尚无共享执行内核 | 容易形成回测—运行偏差 | M4 | `NOT_STARTED` |
@@ -708,11 +710,11 @@ M1完成条件已满足：全部工作包`DONE`，Signal发布中断、Job崩溃
 | M2-04 | 评分与风险分离 | 5 | ScoreModel、RiskPolicy | 技术分、资讯调整和硬阻断可独立测试 | `DONE` |
 | M2-05 | SelectionPolicy | 2 | Top N、阈值和排序规则 | Workflow、Portfolio、Evaluation共用同一Policy | `DONE` |
 | M2-06 | 策略Registry与依赖注入 | 3 | StrategyRegistry、bootstrap组装 | 新增策略不修改Workflow主体分支 | `DONE` |
-| M2-07 | 策略归属贯穿模型 | 5 | `strategy_id`进入Run、Order、Position、Outcome | 任一成交与评估可追溯到具体策略 | `NOT_STARTED` |
-| M2-08 | 参数快照与Hash | 3 | 规范化参数序列化 | 同一Hash代表同一参数；变更自动产生新Hash | `NOT_STARTED` |
+| M2-07 | 策略归属贯穿模型 | 5 | `strategy_id`进入Run、Order、Position、Outcome | 任一成交与评估可追溯到具体策略 | `DONE` |
+| M2-08 | 参数快照与Hash | 3 | 规范化参数序列化 | 同一Hash代表同一参数；变更自动产生新Hash | `DONE` |
 | M2-09 | Golden Snapshot测试 | 3 | 固定输入与输出基线 | 非预期候选或分数变化会使CI失败 | `NOT_STARTED` |
 
-M2进度：`21 / 32 = 65.6%`。完成条件：至少两套Strategy实现可共存，且不复制Workflow。
+M2进度：`29 / 32 = 90.6%`。完成条件：至少两套Strategy实现可共存，且不复制Workflow。
 
 - M2-01证据：新增类型化且不可变的Strategy Identity、Requirements、Context与Result，以及统一Protocol；Context拒绝无时区和晚于`as_of`的信息截止时间；Morning与Pre-close内置适配器均通过`evaluate(context)`调用现有确定性评分，阶段专项语句与分支覆盖率均为100%。
 - M2-02证据：`UniversePolicy`按单一顺序独立执行沪深主板、风险名称、上市状态、历史交易日数、最新停牌/历史ST和20日成交额门槛，并返回过滤后的证券/日线、稳定代码集和排除计数；专项测试逐条覆盖全部规则、缺失核心数据、缺失历史与不可用流动性历史，语句和分支覆盖率100%。
@@ -720,6 +722,8 @@ M2进度：`21 / 32 = 65.6%`。完成条件：至少两套Strategy实现可共�
 - M2-06证据：StrategyRegistry按Signal Kind显式组装，重复注册、缺失注册和跨Signal Context均明确失败；Workflow启动要求两种Signal实现，通过注入版本不同的Registry完成Morning与Pre-close离线贯穿，持久化Run版本来自Registry Identity，新增/替换实现不需修改Workflow主体；既有原子发布、无买单门禁和配置兼容回归通过。
 - M2-04证据：`ScoreModel`只接收版本化Feature Frame，Morning/Pre-close确定性技术分不接收资讯、风险或LLM输入；`RiskPolicy`独立计算正负资讯软调整、未处理官方公告门禁及具有原文证据的硬阻断。空白/缺失证据的LLM硬阻断标记不会形成block，改变资讯只改变最终机会分而不改变技术分；新评分与风险模块语句和分支覆盖率100%。
 - M2-05证据：`SelectionPolicy`统一最低机会分、未阻断优先、机会分降序/代码升序稳定排序、`candidate_limit`和Top N；Workflow早盘连续性、Portfolio买单、Evaluation、Dashboard及报告均消费同一Policy。非默认阈值离线贯穿得到1个早盘连续性输入、2个尾盘候选、2笔订单和2个评价对象；blocked与`tradable=false`门禁回归通过。
+- M2-07证据：Morning与Pre-close的Run从Registry Identity取得强制归属，Research Run UoW验证所有买单与Run归属一致并将业务行和归属置于同一事务；买入Fill把归属传给Position，监控卖单与Opportunity Outcome继承Position归属，Candidate Outcome继承Run归属。阶段端到端证明Run、买卖Order、Position和两类Outcome均可查询同一`strategy_id/version/parameter_hash`；归属冲突、原子发布故障回滚、blocked与`tradable=false`买单门禁、成交幂等、T+1、费用、滑点和现金回归通过。
+- M2-08证据：`StrategyParameterSnapshot`递归规范化显式白名单参数并生成SHA-256；键序变化Hash不变，值或类型变化Hash变化，NaN、Infinity、非字符串键和非JSON类型被拒绝；默认快照包含Universe、Feature Schema、Selection和Risk参数且排除Token/API Key。Schema v5新增不改变既有业务表宽度的`strategy_attributions`旁表；空库、旧库升级、重复初始化、旧positional writer、事务性回填中途失败和恢复通过。Ruff、139项全量测试、74%含分支总覆盖率、参数身份、Strategy包与UoW均100%及pip check通过。
 
 ### M3：数据契约、血缘与LLM治理
 
@@ -788,16 +792,16 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 |---|---:|---:|---:|---|---|
 | M0 架构基线与治理 | 4 | 4 | 100% | `DONE` | 2026-08-15建立本文档并验证现有测试 |
 | M1 正确性、原子性与恢复 | 22 | 22 | 100% | `DONE` | 2026-08-15完成M1-C；93项测试、Ruff、Job崩溃/竞争恢复、原子Upsert、迁移兼容和pip check通过 |
-| M2 策略内核与多策略基础 | 21 | 32 | 65.6% | `IN_PROGRESS` | 2026-08-15完成M2-C；126项测试、73%含分支总覆盖率、评分/风险100%分支覆盖与选择语义贯穿通过 |
+| M2 策略内核与多策略基础 | 29 | 32 | 90.6% | `IN_PROGRESS` | 2026-08-18完成M2-D；139项测试、74%含分支总覆盖率、参数身份100%、归属端到端与迁移恢复通过 |
 | M3 数据契约、血缘与LLM治理 | 0 | 30 | 0% | `NOT_STARTED` | — |
 | M4 Replay与策略实验 | 0 | 30 | 0% | `NOT_STARTED` | — |
 | M5 模块化、可观测性与质量门禁 | 0 | 32 | 0% | `NOT_STARTED` | — |
 | M6 发布强化与规模决策 | 0 | 18 | 0% | `NOT_STARTED` | — |
-| **总体** | **47** | **168** | **28.0%** | `IN_PROGRESS` | M0与M1完成，M2-A/M2-B/M2-C完成；下一阶段M2-D |
+| **总体** | **55** | **168** | **32.7%** | `IN_PROGRESS` | M0与M1完成，M2-A至M2-D完成；下一阶段M2-E |
 
 ### 12.1 当前建议的下一工程阶段
 
-工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M1已完成，M2-A至M2-C已完成；当前建议下一阶段为M2-D：
+工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M1已完成，M2-A至M2-D已完成；当前建议下一阶段为M2-E。M2-09是本里程碑唯一剩余工作包，不能与M3跨里程碑拼接，因此作为3点的里程碑收尾阶段独立验收：
 
 | 阶段ID | 阶段名称 | 工作包 | 点数 | 依赖 | 状态 | 阶段验收目标 |
 |---|---|---|---:|---|---|---|
@@ -807,7 +811,8 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 | M2-A | Strategy契约与注册底座 | M2-01、M2-06 | 6 | M1 | `DONE` | Morning与Pre-close通过统一Strategy契约和Registry组装；新增Strategy实现不修改Workflow主体分支 |
 | M2-B | 股票池与特征流水线 | M2-02、M2-03 | 8 | M2-A | `DONE` | 股票池规则可独立测试；类型化特征流水线不负责新闻、风险和排序；两时段Strategy保持现有候选结果 |
 | M2-C | 评分、风险与选择规则 | M2-04、M2-05 | 7 | M2-B | `DONE` | 技术评分、资讯调整、硬风险和最终选择可独立测试；Workflow、Portfolio与Evaluation共享同一选择语义 |
-| M2-D | 策略归属与参数身份 | M2-07、M2-08 | 8 | M2-C | `NOT_STARTED` | Run、Order、Position和Outcome可追溯到Strategy Identity；规范化参数快照具有稳定Hash且变更自动产生新Hash |
+| M2-D | 策略归属与参数身份 | M2-07、M2-08 | 8 | M2-C | `DONE` | Run、Order、Position和Outcome可追溯到Strategy Identity；规范化参数快照具有稳定Hash且变更自动产生新Hash |
+| M2-E | Golden Snapshot回归基线 | M2-09 | 3 | M2-D | `NOT_STARTED` | 固定输入、Identity与参数快照产生稳定候选/分数；非预期策略漂移会使CI失败 |
 
 `M1-A`已完成，阶段验收证据为：非默认Schedule/Selection从注册计划贯穿Pre-close运行与订单选择；空库、旧库、重复迁移、失败回滚与恢复通过；Ruff、60项全量测试、66%总覆盖率、pip check和PowerShell语法检查通过。
 
@@ -820,6 +825,8 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 `M2-B`已完成，阶段验收证据为：M2-02的七类股票池规则、缺失数据和可审计排除计数均可独立验证；M2-03的两个版本化Feature Schema严格校验字段和类型，Pipeline不持有新闻、风险、评分或排序职责；行情缺失、过期、非法、涨跌停邻近和历史不足路径均失败关闭。Morning与Pre-close离线端到端保持候选、分数与订单语义，Morning仍无买单，blocked Candidate和`tradable=false`门禁回归通过。Ruff、119项全量测试、75%总覆盖率、`strategy/*` 100%语句覆盖、Universe/Feature阶段专项100%分支覆盖和pip check通过。无Schema、迁移、依赖、部署、README或领域语言变化；TD-006及其他后续M2技术债未提前处理。当前建议的下一工程阶段为`M2-C`，顺序为M2-04 → M2-05；不得在该阶段顺手引入策略归属、参数Hash或Golden Snapshot。
 
 `M2-C`已完成，阶段验收证据为：M2-04将只接收Feature Frame的确定性`ScoreModel`与只处理资讯证据的`RiskPolicy`独立，空白/缺失证据的LLM事件不能硬阻断且资讯变化不改变技术分；M2-05由`SelectionPolicy`统一最低机会分、blocked优先级、稳定排序、候选上限和Top N，并贯穿Workflow早盘连续性、Portfolio订单、Evaluation、Dashboard与报告。非默认阈值的Morning→Pre-close离线端到端产生1个早盘连续性输入、2个尾盘候选、2笔订单和2个评价对象；Morning无买单、有证据blocked无买单、无证据LLM事件不硬阻断、`tradable=false`无买单和原子发布回归通过。Ruff、126项全量测试、73%含分支总覆盖率、评分/风险新模块100%语句与分支覆盖、阶段相关模块94%含分支覆盖及pip check通过。无Schema、迁移、依赖、部署或领域语言变化；TD-006仍为`NOT_STARTED`，未提前引入策略归属、参数Hash或Golden Snapshot。当前建议的下一工程阶段为`M2-D`，顺序为M2-07 → M2-08。
+
+`M2-D`已完成，阶段验收证据为：M2-07把Registry Identity强制贯穿Run、原子发布买单、买卖Order、Position、Candidate Outcome和Opportunity Outcome，UoW拒绝归属不一致订单；M2-08以显式非敏感参数白名单生成规范化JSON和SHA-256，并在全部归属实体中持久化同一快照。Morning/Pre-close→买入→持仓→候选评价→卖出→持仓评价离线端到端证明归属一致；Schema v5空库、旧库、重复初始化、旧positional writer、回填中途失败回滚和恢复通过。Ruff、139项全量测试、74%含分支总覆盖率、参数身份、Strategy包与UoW均100%及pip check通过。无依赖、Provider、部署、README或领域语言变化；TD-006转为`IN_PROGRESS`，仅剩源码SHA由M3 Run Manifest贯穿。当前建议下一阶段为`M2-E`，只完成M2-09 Golden Snapshot，不跨入M3。
 
 ### 12.2 阶段级Goal执行规则
 
@@ -1057,6 +1064,7 @@ worker_heartbeat_age_seconds
 | 2026-08-15 | `5b2c4bd037ef`（工作区） | 完成M2-A：Strategy统一契约、内置适配器、Registry与Workflow注入 | M2-01/06、TD-005完成；M2为6/32点；总体32/168点；下一阶段M2-B | Ruff通过；102项测试通过；总覆盖率73%；Strategy语句/分支覆盖率100%；两时段Registry贯穿、安全门禁、原子发布回归和pip check通过 |
 | 2026-08-15 | `eaec29391c5d`（工作区） | 完成M2-B：独立UniversePolicy、版本化FeatureSchema与纯特征流水线 | M2-02/03完成；M2为14/32点；总体40/168点；下一阶段M2-C；TD-006保持NOT_STARTED | Ruff通过；119项测试通过；总覆盖率75%；Universe/Feature语句与分支覆盖率100%；两时段候选/订单、安全门禁和pip check通过 |
 | 2026-08-15 | `5bc5fc27c5f0`（工作区） | 完成M2-C：确定性ScoreModel、证据RiskPolicy与共享SelectionPolicy | M2-04/05完成；M2为21/32点；总体47/168点；下一阶段M2-D；TD-006保持NOT_STARTED | Ruff通过；126项测试通过；含分支总覆盖率73%；评分/风险100%、阶段相关模块94%；两时段选择/订单/评价、安全门禁和pip check通过 |
+| 2026-08-18 | `80bbc91678dd`（工作区） | 完成M2-D：策略归属贯穿、规范化参数快照与稳定Hash、Schema v5归属旁表 | M2-07/08完成；M2为29/32点；总体55/168点；下一阶段M2-E；TD-006转IN_PROGRESS，源码SHA留待M3 | Ruff通过；139项测试通过；含分支总覆盖率74%；参数身份、Strategy包与UoW均100%；归属端到端、Schema五类场景、安全门禁、组合一致性和pip check通过 |
 
 ---
 
@@ -1073,4 +1081,4 @@ KFCQuant当前不是混乱的脚本集合，而是边界意识较强、具备运
 5. M5降低模块耦合并建立主动观测；
 6. M6在真实指标证明需要时强化发布和扩展基础设施。
 
-M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2-A已建立Strategy契约与注册底座，M2-B已独立股票池与版本化特征流水线，M2-C已拆分评分、风险并统一最终选择语义，下一步进入M2-D贯穿策略归属与参数身份；在M2和M3完成前仍不宜大规模并行增加策略。完成M4后，系统才具备完整实验闭环。
+M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2-A已建立Strategy契约与注册底座，M2-B已独立股票池与版本化特征流水线，M2-C已拆分评分、风险并统一最终选择语义，M2-D已贯穿策略归属与参数身份。下一步以M2-E Golden Snapshot完成M2收尾；在M2和M3完成前仍不宜大规模并行增加策略。完成M4后，系统才具备完整实验闭环。

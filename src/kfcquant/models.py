@@ -7,6 +7,12 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from kfcquant.strategy_identity import (
+    canonical_parameter_json,
+    parameter_hash,
+    validate_strategy_identifier,
+)
+
 
 class SourceTier(StrEnum):
     OFFICIAL = "official"
@@ -92,6 +98,22 @@ class EvaluationStatus(StrEnum):
     HIT = "hit"
     MISS = "miss"
     NOT_EVALUABLE = "not_evaluable"
+
+
+class StrategyAttribution(BaseModel):
+    strategy_id: str
+    strategy_version: str
+    parameter_hash: str
+    strategy_parameters: dict[str, Any]
+
+    @model_validator(mode="after")
+    def validate_strategy_attribution(self) -> Self:
+        validate_strategy_identifier("strategy_id", self.strategy_id)
+        validate_strategy_identifier("strategy_version", self.strategy_version)
+        canonical = canonical_parameter_json(self.strategy_parameters)
+        if parameter_hash(canonical) != self.parameter_hash:
+            raise ValueError("parameter_hash does not match strategy_parameters")
+        return self
 
 
 class Security(BaseModel):
@@ -223,11 +245,10 @@ class CandidateScore(BaseModel):
     quote_at: datetime
 
 
-class SignalRun(BaseModel):
+class SignalRun(StrategyAttribution):
     run_id: str = Field(default_factory=lambda: str(uuid4()))
     as_of: datetime
     signal_kind: SignalKind = SignalKind.PRECLOSE_ENTRY
-    strategy_version: str = "preclose-v1"
     information_cutoff: datetime | None = None
     data_as_of: datetime | None = None
     status: RunStatus
@@ -272,7 +293,7 @@ class SignalRun(BaseModel):
         return self.model_copy(update=updates)
 
 
-class CandidateOutcome(BaseModel):
+class CandidateOutcome(StrategyAttribution):
     outcome_id: str = Field(default_factory=lambda: str(uuid4()))
     run_id: str
     ts_code: str
@@ -288,7 +309,7 @@ class CandidateOutcome(BaseModel):
     evaluated_at: datetime
 
 
-class PaperOrder(BaseModel):
+class PaperOrder(StrategyAttribution):
     order_id: str = Field(default_factory=lambda: str(uuid4()))
     run_id: str
     ts_code: str
@@ -315,7 +336,7 @@ class PaperFill(BaseModel):
     total_cash_change: float
 
 
-class PaperPosition(BaseModel):
+class PaperPosition(StrategyAttribution):
     position_id: str = Field(default_factory=lambda: str(uuid4()))
     ts_code: str
     opened_at: datetime
@@ -331,7 +352,7 @@ class PaperPosition(BaseModel):
     realized_pnl: float | None = None
 
 
-class OpportunityOutcome(BaseModel):
+class OpportunityOutcome(StrategyAttribution):
     outcome_id: str = Field(default_factory=lambda: str(uuid4()))
     position_id: str
     ts_code: str

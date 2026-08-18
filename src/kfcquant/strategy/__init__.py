@@ -23,6 +23,7 @@ from kfcquant.strategy.registry import StrategyRegistry
 from kfcquant.strategy.risk import RiskAssessment, RiskPolicy
 from kfcquant.strategy.scoring import ScoreModel
 from kfcquant.strategy.universe import UniversePolicy, UniverseSelection
+from kfcquant.strategy_identity import StrategyParameterSnapshot
 
 __all__ = [
     "FeatureField",
@@ -40,6 +41,7 @@ __all__ = [
     "Strategy",
     "StrategyContext",
     "StrategyIdentity",
+    "StrategyParameterSnapshot",
     "StrategyRegistry",
     "StrategyRequirements",
     "StrategyResult",

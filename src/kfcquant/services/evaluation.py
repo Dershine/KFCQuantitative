@@ -61,15 +61,29 @@ class CandidateEvaluationService:
                     self.live_provider.fetch_intraday_bars(code, evaluation_start, window_end, 5),
                     key=lambda item: item.start_at,
                 )
-            outcome = self._from_bars(str(run["run_id"]), code, kind, baseline_bars, evaluation_bars, evaluation_date)
+            outcome = self._from_bars(
+                run,
+                code,
+                kind,
+                baseline_bars,
+                evaluation_bars,
+                evaluation_date,
+            )
             self.database.save_candidate_outcome(outcome)
             outcomes.append(outcome)
         return outcomes
 
-    def _from_bars(self, run_id, code, kind, baseline_bars, evaluation_bars, evaluated_at) -> CandidateOutcome:
+    def _from_bars(self, run, code, kind, baseline_bars, evaluation_bars, evaluated_at) -> CandidateOutcome:
+        attribution = {
+            "strategy_id": run["strategy_id"],
+            "strategy_version": run["strategy_version"],
+            "parameter_hash": run["parameter_hash"],
+            "strategy_parameters": run["strategy_parameters"],
+        }
         if not baseline_bars or not evaluation_bars:
             return CandidateOutcome(
-                run_id=run_id,
+                **attribution,
+                run_id=str(run["run_id"]),
                 ts_code=code,
                 signal_kind=kind,
                 status=EvaluationStatus.NOT_EVALUABLE,
@@ -79,7 +93,8 @@ class CandidateEvaluationService:
         baseline_bar = baseline_bars[0]
         if baseline_bar.volume <= 0 or baseline_bar.amount <= 0:
             return CandidateOutcome(
-                run_id=run_id,
+                **attribution,
+                run_id=str(run["run_id"]),
                 ts_code=code,
                 signal_kind=kind,
                 status=EvaluationStatus.NOT_EVALUABLE,
@@ -94,7 +109,8 @@ class CandidateEvaluationService:
         lows = [bar.low for bar in evaluation_bars]
         hit_bar = next((bar for bar in evaluation_bars if bar.high >= target), None)
         return CandidateOutcome(
-            run_id=run_id,
+            **attribution,
+            run_id=str(run["run_id"]),
             ts_code=code,
             signal_kind=kind,
             status=EvaluationStatus.HIT if hit_bar else EvaluationStatus.MISS,

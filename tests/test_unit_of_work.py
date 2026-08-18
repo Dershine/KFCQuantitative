@@ -17,11 +17,14 @@ from kfcquant.models import (
     SignalRun,
 )
 from kfcquant.unit_of_work import DuckDBResearchRunUnitOfWork, JobCompletion
+from tests.conftest import strategy_attribution
 
 
 def publication_fixture():
     at = datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ)
+    attribution = strategy_attribution()
     run = SignalRun(
+        **attribution,
         run_id="atomic-run",
         as_of=at,
         status=RunStatus.SUCCESS,
@@ -42,6 +45,7 @@ def publication_fixture():
         quote_at=at,
     )
     order = PaperOrder(
+        **attribution,
         order_id="atomic-order",
         run_id=run.run_id,
         ts_code=candidate.ts_code,
@@ -138,6 +142,13 @@ def test_uow_rejects_inconsistent_publication_contracts(settings):
         ),
         (run, [candidates[0].model_copy(update={"run_id": "other"})], orders, job, "candidate must belong"),
         (run, candidates, [orders[0].model_copy(update={"run_id": "other"})], job, "order must belong"),
+        (
+            run,
+            candidates,
+            [orders[0].model_copy(update={"strategy_id": "other-strategy"})],
+            job,
+            "strategy attribution",
+        ),
         (run, candidates, orders, replace(job, status="failed"), "job completion status"),
         (
             run.model_copy(update={"lifecycle_state": ResearchRunState.FAILED, "status": RunStatus.FAILED}),

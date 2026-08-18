@@ -6,6 +6,16 @@ import pandas as pd
 import pytest
 
 from kfcquant.config import Settings
+from kfcquant.strategy import StrategyIdentity, StrategyParameterSnapshot
+
+
+def strategy_attribution(
+    strategy_id: str = "fixture-strategy",
+    version: str = "fixture-v1",
+    parameters: dict[str, object] | None = None,
+) -> dict[str, object]:
+    snapshot = StrategyParameterSnapshot.from_mapping(parameters or {"fixture": True})
+    return StrategyIdentity(strategy_id, version, snapshot).attribution_fields()
 
 
 @pytest.fixture

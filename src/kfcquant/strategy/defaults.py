@@ -8,9 +8,37 @@ from kfcquant.strategy.contracts import (
     StrategyRequirements,
     StrategyResult,
 )
-from kfcquant.strategy.features import FeaturePipeline
+from kfcquant.strategy.features import MORNING_FEATURE_SCHEMA, PRECLOSE_FEATURE_SCHEMA, FeaturePipeline
 from kfcquant.strategy.registry import StrategyRegistry
 from kfcquant.strategy.universe import UniversePolicy
+from kfcquant.strategy_identity import StrategyParameterSnapshot
+
+
+def _strategy_parameter_snapshot(settings: Settings, signal_kind: SignalKind) -> StrategyParameterSnapshot:
+    parameters: dict[str, object] = {
+        "universe": {
+            "min_listing_trading_days": settings.min_listing_trading_days,
+            "min_median_amount_20d": settings.min_median_amount_20d,
+        },
+        "selection": settings.selection.model_dump(mode="json"),
+        "risk": {"news_lookback_trading_days": settings.news_lookback_trading_days},
+    }
+    if signal_kind == SignalKind.MORNING_WATCHLIST:
+        parameters["features"] = {
+            "schema": MORNING_FEATURE_SCHEMA.version,
+            "market_close": settings.schedule.market_close,
+        }
+    else:
+        parameters["features"] = {
+            "schema": PRECLOSE_FEATURE_SCHEMA.version,
+            "quote_freshness_seconds": settings.quote_freshness_seconds,
+            "limit_distance_fraction": settings.limit_distance_fraction,
+            "market_morning_open": settings.schedule.market_morning_open,
+            "market_morning_close": settings.schedule.market_morning_close,
+            "market_afternoon_open": settings.schedule.market_afternoon_open,
+            "market_close": settings.schedule.market_close,
+        }
+    return StrategyParameterSnapshot.from_mapping(parameters)
 
 
 class MorningWatchlistStrategy:
@@ -20,7 +48,11 @@ class MorningWatchlistStrategy:
     def __init__(self, settings: Settings) -> None:
         from kfcquant.services.scoring import ScoringService
 
-        self.identity = StrategyIdentity("morning-watchlist", settings.strategy_version_morning)
+        self.identity = StrategyIdentity(
+            "morning-watchlist",
+            settings.strategy_version_morning,
+            _strategy_parameter_snapshot(settings, self.signal_kind),
+        )
         self._universe = UniversePolicy.from_settings(settings)
         self._features = FeaturePipeline.from_settings(settings)
         self._scoring = ScoringService(settings)
@@ -50,7 +82,11 @@ class PrecloseEntryStrategy:
     def __init__(self, settings: Settings) -> None:
         from kfcquant.services.scoring import ScoringService
 
-        self.identity = StrategyIdentity("preclose-entry", settings.strategy_version_preclose)
+        self.identity = StrategyIdentity(
+            "preclose-entry",
+            settings.strategy_version_preclose,
+            _strategy_parameter_snapshot(settings, self.signal_kind),
+        )
         self._universe = UniversePolicy.from_settings(settings)
         self._features = FeaturePipeline.from_settings(settings)
         self._scoring = ScoringService(settings)
