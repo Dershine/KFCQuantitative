@@ -1,0 +1,257 @@
+{
+  "fixture_schema_version": 1,
+  "input_sha256": "14f7f5a04d1c86337cf5eb678c6cc412408bd3c78a2191506bcb6ba31cc083c7",
+  "strategies": {
+    "morning_watchlist": {
+      "candidates": [
+        {
+          "block_reasons": [],
+          "blocked": false,
+          "factor_breakdown": {
+            "close_location": 0.5,
+            "continuity_score": 0.0,
+            "gap_abs": 0.0,
+            "intraday_strength": 0.0,
+            "limit_proximity": 0.0,
+            "median_amount_20d": 230000000.0,
+            "morning_status": "not_applicable",
+            "news_score": 0.0,
+            "positive_score": 85.0,
+            "projected_volume_ratio": 1.0,
+            "ret_1d": 0.001781472684,
+            "ret_20d": 0.036877688998,
+            "ret_5d": 0.008971291866,
+            "risk_penalty": 10.0,
+            "technical_score": 67.5,
+            "volatility_20d": 1.894017e-05
+          },
+          "name": "Company 3",
+          "opportunity_score": 60.5,
+          "quote_at": "2026-08-07T15:00:00+08:00",
+          "rank": 1,
+          "risk_event_ids": [
+            "unsupported-hard-block"
+          ],
+          "ts_code": "002001.SZ"
+        },
+        {
+          "block_reasons": [],
+          "blocked": false,
+          "factor_breakdown": {
+            "close_location": 0.5,
+            "continuity_score": 0.0,
+            "gap_abs": 0.0,
+            "intraday_strength": 0.0,
+            "limit_proximity": 0.0,
+            "median_amount_20d": 220000000.0,
+            "morning_status": "not_applicable",
+            "news_score": 2.4,
+            "positive_score": 61.666666666667,
+            "projected_volume_ratio": 1.0,
+            "ret_1d": 0.001373626374,
+            "ret_20d": 0.028208744711,
+            "ret_5d": 0.006906077348,
+            "risk_penalty": 6.666666666667,
+            "technical_score": 49.5,
+            "volatility_20d": 1.1171296e-05
+          },
+          "name": "Company 2",
+          "opportunity_score": 51.9,
+          "quote_at": "2026-08-07T15:00:00+08:00",
+          "rank": 2,
+          "risk_event_ids": [
+            "positive-evidence"
+          ],
+          "ts_code": "000001.SZ"
+        },
+        {
+          "block_reasons": [
+            "regulatory_investigation: formal investigation"
+          ],
+          "blocked": true,
+          "factor_breakdown": {
+            "close_location": 0.5,
+            "continuity_score": 0.0,
+            "gap_abs": 0.0,
+            "intraday_strength": 0.0,
+            "limit_proximity": 0.0,
+            "median_amount_20d": 210000000.0,
+            "morning_status": "not_applicable",
+            "news_score": 0.0,
+            "positive_score": 38.333333333333,
+            "projected_volume_ratio": 1.0,
+            "ret_1d": 0.000814332248,
+            "ret_20d": 0.016542597188,
+            "ret_5d": 0.00408496732,
+            "risk_penalty": 3.333333333333,
+            "technical_score": 31.5,
+            "volatility_20d": 3.883882e-06
+          },
+          "name": "Company 1",
+          "opportunity_score": 16.5,
+          "quote_at": "2026-08-07T15:00:00+08:00",
+          "rank": 3,
+          "risk_event_ids": [
+            "supported-hard-block"
+          ],
+          "ts_code": "600000.SH"
+        }
+      ],
+      "eligible_count": 3,
+      "exclusion_counts": {
+        "eligible": 3
+      },
+      "identity": {
+        "parameter_hash": "42edb8975d2509c5fc5230224252aa0d6427469cee73e6ae3f59bdb8dcaa5543",
+        "strategy_id": "morning-watchlist",
+        "strategy_parameters": {
+          "features": {
+            "market_close": "15:00:00",
+            "schema": "morning-features-v1"
+          },
+          "risk": {
+            "news_lookback_trading_days": 5
+          },
+          "selection": {
+            "candidate_limit": 100,
+            "minimum_opportunity_score": 0.0,
+            "top_n": 10
+          },
+          "universe": {
+            "min_listing_trading_days": 120,
+            "min_median_amount_20d": 100000000.0
+          }
+        },
+        "strategy_version": "morning-v1"
+      }
+    },
+    "preclose_entry": {
+      "candidates": [
+        {
+          "block_reasons": [],
+          "blocked": false,
+          "factor_breakdown": {
+            "close_location": 0.798683160415,
+            "continuity_score": 3.0,
+            "gap_abs": 0.003,
+            "intraday_strength": 0.005982053838,
+            "limit_proximity": 0.0,
+            "median_amount_20d": 230000000.0,
+            "morning_status": "confirmed",
+            "news_score": 0.0,
+            "positive_score": 100.0,
+            "projected_volume_ratio": 0.806324110672,
+            "ret_1d": 0.0,
+            "ret_20d": 0.036877688998,
+            "ret_5d": 0.008971291866,
+            "risk_penalty": 10.0,
+            "technical_score": 81.0,
+            "volatility_20d": 1.894017e-05
+          },
+          "name": "Company 3",
+          "opportunity_score": 77.0,
+          "quote_at": "2026-08-10T06:40:00Z",
+          "rank": 1,
+          "risk_event_ids": [
+            "unsupported-hard-block"
+          ],
+          "ts_code": "002001.SZ"
+        },
+        {
+          "block_reasons": [],
+          "blocked": false,
+          "factor_breakdown": {
+            "close_location": 0.77654622035,
+            "continuity_score": 3.0,
+            "gap_abs": 0.003,
+            "intraday_strength": 0.004985044865,
+            "limit_proximity": 0.0,
+            "median_amount_20d": 220000000.0,
+            "morning_status": "confirmed",
+            "news_score": 2.0,
+            "positive_score": 66.666666666667,
+            "projected_volume_ratio": 0.793388429752,
+            "ret_1d": 0.0,
+            "ret_20d": 0.028208744711,
+            "ret_5d": 0.006906077348,
+            "risk_penalty": 7.333333333333,
+            "technical_score": 53.4,
+            "volatility_20d": 1.1171296e-05
+          },
+          "name": "Company 2",
+          "opportunity_score": 58.4,
+          "quote_at": "2026-08-10T06:40:00Z",
+          "rank": 2,
+          "risk_event_ids": [
+            "positive-evidence"
+          ],
+          "ts_code": "000001.SZ"
+        },
+        {
+          "block_reasons": [
+            "regulatory_investigation: formal investigation"
+          ],
+          "blocked": true,
+          "factor_breakdown": {
+            "close_location": 0.748877805486,
+            "continuity_score": 0.0,
+            "gap_abs": 0.003,
+            "intraday_strength": 0.003988035892,
+            "limit_proximity": 0.0,
+            "median_amount_20d": 210000000.0,
+            "morning_status": "new",
+            "news_score": 0.0,
+            "positive_score": 33.333333333333,
+            "projected_volume_ratio": 0.779220779221,
+            "ret_1d": 0.0,
+            "ret_20d": 0.016542597188,
+            "ret_5d": 0.00408496732,
+            "risk_penalty": 4.666666666667,
+            "technical_score": 25.8,
+            "volatility_20d": 3.883882e-06
+          },
+          "name": "Company 1",
+          "opportunity_score": 10.8,
+          "quote_at": "2026-08-10T06:40:00Z",
+          "rank": 3,
+          "risk_event_ids": [
+            "supported-hard-block"
+          ],
+          "ts_code": "600000.SH"
+        }
+      ],
+      "eligible_count": 3,
+      "exclusion_counts": {
+        "eligible": 3
+      },
+      "identity": {
+        "parameter_hash": "f230cfca6656ea3e147fb2e2034c07a573c46d1eeabbf9c4d7de4a3808e2fd36",
+        "strategy_id": "preclose-entry",
+        "strategy_parameters": {
+          "features": {
+            "limit_distance_fraction": 0.01,
+            "market_afternoon_open": "13:00:00",
+            "market_close": "15:00:00",
+            "market_morning_close": "11:30:00",
+            "market_morning_open": "09:30:00",
+            "quote_freshness_seconds": 60,
+            "schema": "preclose-features-v1"
+          },
+          "risk": {
+            "news_lookback_trading_days": 5
+          },
+          "selection": {
+            "candidate_limit": 100,
+            "minimum_opportunity_score": 0.0,
+            "top_n": 10
+          },
+          "universe": {
+            "min_listing_trading_days": 120,
+            "min_median_amount_20d": 100000000.0
+          }
+        },
+        "strategy_version": "preclose-v2"
+      }
+    }
+  }
+}
