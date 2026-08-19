@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -429,7 +430,7 @@ class DeploymentManager:
 
     def _write_release(self, release: Path, sha: str, *, workflow: dict[str, object]) -> None:
         build_time = self._run_git("show", "-s", "--format=%cI", sha).strip()
-        write_release_manifest(
+        manifest = write_release_manifest(
             release,
             sha,
             source_commit_time=build_time,
@@ -441,7 +442,8 @@ class DeploymentManager:
         temporary.write_text(
             f"KFCQUANT_SOURCE_SHA={sha}\n"
             f"KFCQUANT_BUILD_TIME={build_time}\n"
-            "KFCQUANT_RELEASE_MANIFEST=.release-manifest.json\n",
+            "KFCQUANT_RELEASE_MANIFEST=.release-manifest.json\n"
+            f"KFCQUANT_DEPENDENCY_LOCK_SHA256={manifest['requirements_lock_sha256']}\n",
             encoding="utf-8",
         )
         temporary.replace(release_env_file)
@@ -468,7 +470,20 @@ class DeploymentManager:
         manifest_name = values.get("KFCQUANT_RELEASE_MANIFEST")
         if manifest_name is None:
             return True  # Compatibility for the Active Release built before M6-B.
-        return manifest_name == ".release-manifest.json" and verify_release_manifest(release, sha)
+        try:
+            requirements_lock_sha256 = hashlib.sha256(
+                (release / "requirements.lock").read_bytes()
+            ).hexdigest()
+        except OSError:
+            return False
+        lock_sha256 = values.get("KFCQUANT_DEPENDENCY_LOCK_SHA256")
+        return bool(
+            manifest_name == ".release-manifest.json"
+            and lock_sha256
+            and SHA256_PATTERN.fullmatch(lock_sha256)
+            and lock_sha256 == requirements_lock_sha256
+            and verify_release_manifest(release, sha)
+        )
 
     def _release_source_is_clean(self, release: Path, sha: str) -> bool:
         try:

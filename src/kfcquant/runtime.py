@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime
@@ -18,6 +19,9 @@ from kfcquant.observability import AlertCode, MetricName, Observability, get_obs
 @lru_cache(maxsize=1)
 def build_identity() -> dict[str, object]:
     configured_sha = os.getenv("KFCQUANT_SOURCE_SHA", "").strip()
+    configured_lock_sha256 = os.getenv("KFCQUANT_DEPENDENCY_LOCK_SHA256", "").strip().lower()
+    if configured_lock_sha256 and not re.fullmatch(r"[0-9a-f]{64}", configured_lock_sha256):
+        raise RuntimeError("KFCQUANT_DEPENDENCY_LOCK_SHA256 must be a 64-character SHA-256")
     repository_root = Path(__file__).resolve().parents[2]
     source_sha = configured_sha
     source_dirty = False
@@ -43,7 +47,7 @@ def build_identity() -> dict[str, object]:
             source_sha = "development"
             source_dirty = True
     lock_path = repository_root / "requirements.lock"
-    dependency_lock_sha256 = (
+    dependency_lock_sha256 = configured_lock_sha256 or (
         hashlib.sha256(lock_path.read_bytes()).hexdigest() if lock_path.is_file() else "unavailable"
     )
     return {

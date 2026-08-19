@@ -52,11 +52,22 @@ def _gateway_inputs(at: datetime) -> dict[str, object]:
 def test_build_identity_prefers_release_sha_and_hashes_dependency_lock(monkeypatch):
     build_identity.cache_clear()
     monkeypatch.setenv("KFCQUANT_SOURCE_SHA", "c" * 40)
+    monkeypatch.setenv("KFCQUANT_DEPENDENCY_LOCK_SHA256", "d" * 64)
     identity = build_identity()
 
     assert identity["source_sha"] == "c" * 40
     assert identity["source_dirty"] is False
-    assert len(str(identity["dependency_lock_sha256"])) == 64
+    assert identity["dependency_lock_sha256"] == "d" * 64
+    build_identity.cache_clear()
+
+
+def test_build_identity_rejects_invalid_release_dependency_lock_hash(monkeypatch):
+    build_identity.cache_clear()
+    monkeypatch.setenv("KFCQUANT_SOURCE_SHA", "c" * 40)
+    monkeypatch.setenv("KFCQUANT_DEPENDENCY_LOCK_SHA256", "unavailable")
+
+    with pytest.raises(RuntimeError, match="KFCQUANT_DEPENDENCY_LOCK_SHA256"):
+        build_identity()
     build_identity.cache_clear()
 
 

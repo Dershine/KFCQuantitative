@@ -10,7 +10,7 @@
 | 首次建立 | 2026-08-15 |
 | 最近复核 | 2026-08-19 |
 | 项目版本基线 | `0.2.0` |
-| 源码基线 | `611e2f4`（M6-B实现与本文更新位于当前未提交工作区） |
+| 源码基线 | `228f34f`（M6-B实现与本文更新已提交，当前工作区基线） |
 | 适用范围 | Research Service、Operations Manager、数据与部署基础设施 |
 | 目标读者 | 项目维护者、策略开发者、代码审查者、部署维护者 |
 | 领域语言 | 以根目录 `CONTEXT.md` 为准 |
@@ -544,6 +544,7 @@ flowchart TD
 | TD-015 | MEDIUM | LLM Prompt与响应曾缺少完整版本和追踪元数据 | 风险事件已关联Prompt/Input/Response Hash、模型、耗时和失败元数据 | M3 | `DONE` |
 | TD-016 | LOW | Python要求曾存在3.12/3.13口径差异 | 合法环境可能被doctor误判 | M1 | `DONE` |
 | TD-017 | LOW | CI曾缺少覆盖率门槛、类型检查和依赖安全检查 | 现由84%合并分支覆盖率、核心契约mypy、Bandit高严重度扫描和生产锁文件漏洞审计阻断退化 | M5 | `DONE` |
+| TD-018 | HIGH | wheel安装后的运行时曾从`site-packages`推导仓库根，导致依赖锁Hash显示为`unavailable` | 当前工作区已让Release环境显式携带并校验锁Hash，且新Release完整性检查拒绝环境值漂移；尚待经不可变SHA发布到Ubuntu Active Release | OPS-A | `IN_PROGRESS` |
 
 技术债状态更新必须附带以下之一：
 
@@ -912,9 +913,29 @@ M6进度：`18 / 18 = 100%`。完成条件已满足：M6-A提供原子Release与
 | M6 发布强化与规模决策 | 18 | 18 | 100% | `DONE` | 2026-08-19完成M6-B；隔离恢复、Release来源、secret门禁、性能/锁基线和扩展决策通过 |
 | **总体** | **168** | **168** | **100%** | `DONE` | M0至M6全部完成；下一步为生产证据积累，不立即扩展架构 |
 
+OPS-A是独立运行证据阶段，不并入上述168点架构路线。当前已验收点数为`0/10`：三个工作包均已有真实产物；Research密钥与提交、推送、部署授权已满足，OPS-01正在形成经CI验证的不可变发布，OPS-02受其依赖约束尚不能标记DONE，OPS-03的锁与查询门槛虽已满足，仍必须继续等待真实14:40 Job，不能提前计点。
+
 ### 12.1 当前建议的下一工程阶段
 
-工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M0至M6以及M1-A至M6-B已经全部完成。下一建议阶段是`OPS-A 生产保障证据积累`：在获得Ubuntu服务器或等价隔离环境授权后，验证systemd定时器真实触发、服务级备份恢复与健康，并累计至少20个14:40 Job、100个锁等待和每类20个查询样本后复算容量决策。该建议不进入当前168点架构路线，也不授权部署、真实数据修改或引入PostgreSQL/队列；在运行环境与授权满足前保持Definition of Ready未满足。
+工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M0至M6以及M1-A至M6-B已经全部完成。下一建议阶段是`OPS-A 生产保障证据积累`。该阶段独立于已经完成的168点架构路线，不改变M0至M6完成度；它只把M6-B建立的恢复与容量门槛放入真实Ubuntu运行环境取证，不授权引入PostgreSQL、队列或真实券商连接。
+
+| 工作包 | 名称 | 点数 | 依赖 | Definition of Done | 状态 |
+|---|---|---:|---|---|---|
+| OPS-01 | Ubuntu引导与Active Release基线 | 3 | M6-B；专用Ubuntu环境；明确的系统级部署授权与入口配置 | 从已审查SHA建立不可变Release、独立venv和原子`current`链接；Research/Ops配置通过启动校验；worker、web与ops服务健康；构建或配置失败不污染Active Release | `IN_PROGRESS` |
+| OPS-02 | 定时恢复与服务健康演练 | 3 | OPS-01；至少一份由正式备份流程产生的保留备份 | 已安装timer真实触发一次隔离恢复；报告Hash、DuckDB、Schema和核心表健康通过；演练前后Active Release、正式数据库和备份Hash不变；失败注入产生非零状态且服务健康可恢复 | `IN_PROGRESS` |
+| OPS-03 | 运行容量证据与决策复算 | 4 | OPS-01、OPS-02；正常调度与指标持续运行 | 累计至少20个真实14:40 Job、100个成功锁等待和三类查询各20次；容量报告完整且Hash有效；按既定阈值复算并记录结论，证据不足或指标超限均不得自动改变架构 | `IN_PROGRESS` |
+
+OPS-A总点数：`10`。工作顺序为OPS-01 → OPS-02 → OPS-03。阶段级验收要求三包全部`DONE`，真实systemd触发、服务健康、隔离恢复、故障恢复和容量决策证据可审计，Ruff、全量Pytest、相关覆盖率及适用部署/锁/恢复专项通过，并复核远端未泄露密钥、未连接券商、未削弱Research/Operations隔离和Active Release回滚能力。
+
+OPS-A的Definition of Ready还要求：服务器被明确授权作为KFCQuant专用环境；允许创建系统用户并写入`/opt/kfcquant`、`/var/lib/kfcquant`、`/var/lib/kfcops`、`/etc/kfcquant`、systemd和Nginx配置；入口域名或IP、证书邮箱和Basic Auth方式明确；Research密钥由运维者在服务器上安全配置；待部署源码可通过GitHub验证或经审计的离线Git来源传输。任一条件缺失时阶段保持`PLANNED`，不得以Fake或人工合成14:40样本替代生产证据。
+
+OPS-A最近证据（2026-08-19）：
+
+- OPS-01：`43.136.108.53`已从受审`228f34f`建立独立Release/venv和`current`链接；Ubuntu 24.04、Python 3.12.3、Nginx、worker、web、ops与assurance timer均健康，裸IP入口使用IP SAN自签名TLS与Basic Auth，证书私钥和初始凭据权限分别为`640 root:kfcquant`与`600 root:root`。外部HTTPS无凭据返回401，Research/Ops内部健康返回200。真实wheel运行发现依赖锁Hash为`unavailable`，工作区已用显式Release环境契约和完整性校验修复；bootstrap还改为迁移与Nginx校验通过后才建立首个`current`，并拒绝替换不同的既有Active Release。2026-08-19复核确认`LLM_API_KEY`已在实际`/etc/kfcquant/research.env`中非空，文件权限为`640 root:kfcquant`；用户已授权提交、推送和正式部署，公开GitHub仓库允许服务器无token读取源码与Actions证据。本包恢复为IN_PROGRESS，尚待新SHA通过CI并完成原子发布与健康验收。
+- OPS-02：引导后正式备份与首次timer/故障演练通过；完成历史初始化后又由同一正式部署备份实现生成`20260819165446-228f34f847ae.duckdb`，其SHA-256与当前正式库均为`4d27c8f566d2f693feea842566c5a834281d1e92e5f7d62dba8e8ae7cd217d74`。已安装timer真实触发成功并恢复到每周日03:30加随机延迟的计划；最新成功报告`20260819T085457943422Z-3a57ce123c3f41528d64ac21252fa6cf.json`验证隔离副本Hash相同、DuckDB只读打开、Schema v10及核心表健康，耗时0.119秒。坏备份注入报告以退出码1和DuckDB `IOException`失败关闭；正式库、好备份、Active Release和四个服务保持不变，测试文件与timer覆盖均已清理。DoD证据本身已通过，但在OPS-01依赖完成前保持IN_PROGRESS。
+- OPS-03：正式`sync-calendar`确认当天交易日并写入21行，随后受90分钟systemd上限保护的初始`sync-eod`在2,243秒内成功同步5,547只证券、122个交易日和386,599条日线，共生成35个采集批次；连同前序日历批次，36份Parquet逐一重算Hash全部通过，数据库为Schema v10且行数匹配。最新容量报告`20260819T085530463632Z-9bf4de6d92f54e36a154b3f740d7f715.json`包含103个成功锁样本和三类查询各20次，锁P95为0.000377秒，查询P95最大0.001085秒，最新恢复RTO为0.119秒，无无效指标行。两个Job耗时样本仅为`sync-calendar`与`sync-eod`，不能冒充14:40信号Job；真实14:40 Job仍为0。决策报告`20260819T085543130946Z-67ec00c035f545d381a34ee2b15cc8d9.json`继续以`collect_more_evidence`收敛，机器门槛缺口仅剩`run-preclose` Job样本，`architecture_changed=false`；容量实现和自动化测试均明确只以`job_duration_seconds:run-preclose`计数。密钥前置已满足，本包恢复为IN_PROGRESS；不可变修复发布后仍须由正常Scheduler经历真实交易日，不得用窗口外手工运行、初始化Job或合成指标替代。
+
+OPS-A当前恢复入口：密钥、提交、推送与正式部署授权均已满足；先完成GitHub CI、不可变Release发布、doctor、依赖锁Hash、Active Release健康和回滚点验收，再由正常Scheduler积累20个真实14:40 Job并重算容量报告。阶段保持IN_PROGRESS；真实交易日尚未经过不是伪造样本或削弱门槛的理由。
 
 | 阶段ID | 阶段名称 | 工作包 | 点数 | 依赖 | 状态 | 阶段验收目标 |
 |---|---|---|---:|---|---|---|
@@ -940,6 +961,7 @@ M6进度：`18 / 18 = 100%`。完成条件已满足：M6-A提供原子Release与
 | M5-D | CI门禁与故障注入 | M5-07、M5-08 | 8 | M5-C | `DONE` | 覆盖率、类型、安全与依赖退化可阻断合并；数据源、锁、崩溃及恢复的关键失败路径具有自动化证据 |
 | M6-A | 原子发布与迁移预检 | M6-01、M6-02 | 8 | M5 | `DONE` | Release构建和迁移在切换前完成兼容预检；失败不污染Active Release，不可安全回滚的变更被明确阻止或批准 |
 | M6-B | 恢复、供应链与规模决策 | M6-03、M6-04、M6-05、M6-06 | 10 | M6-A | `DONE` | 备份可恢复且通过健康检查；Release来源可追踪；性能与锁基线为继续使用DuckDB或扩展架构提供证据化门槛 |
+| OPS-A | 生产保障证据积累 | OPS-01、OPS-02、OPS-03 | 10 | M6-B；真实Ubuntu环境与部署授权 | `IN_PROGRESS` | 不伪造样本地完成Active Release健康、真实timer恢复演练和既定容量门槛复算；不自动改变架构 |
 
 `M1-A`已完成，阶段验收证据为：非默认Schedule/Selection从注册计划贯穿Pre-close运行与订单选择；空库、旧库、重复迁移、失败回滚与恢复通过；Ruff、60项全量测试、66%总覆盖率、pip check和PowerShell语法检查通过。
 
@@ -1242,7 +1264,9 @@ M6-B把证据门槛固化为可执行Policy：至少20个`run-preclose`耗时样
 | 2026-08-19 | `5be4d10c5647`（工作区） | 完成M5-C：脱敏JSON关联日志、类型化指标、本地审计与可选Webhook告警 | M5-04/05、TD-012完成；M5为24/32点；总体142/168点；下一阶段M5-D | Ruff、320项全量测试、Research含分支覆盖86%、Observability 91%、UoW 100%、11项M5-C、119项安全专项、36项迁移/运行专项和pip check通过 |
 | 2026-08-19 | `383ab17a611a`（工作区） | 完成M5-D：84%合并分支覆盖率、核心契约类型检查、代码/依赖安全门禁与关键故障注入 | M5-07/08、TD-017完成；M5为32/32点并完成；总体150/168点；下一阶段M6-A | Ruff、327项全量测试、Research/合并覆盖率87%/84.09%、mypy、Bandit、pip-audit、54项故障/迁移/组合专项和pip check通过；Provider/锁/崩溃/租约/heartbeat/Scheduler恢复验证通过 |
 | 2026-08-19 | `86f352c`（工作区） | 完成M6-A：独立Release/venv、原子Active切换、迁移契约与副本预检 | M6-01/02、TD-013完成；M6为8/18点；总体158/168点；下一阶段M6-B | Ruff、348项全量测试、合并84.33%含分支覆盖率、46项部署/迁移/恢复专项、mypy、Bandit、pip-audit和pip check通过；Windows跳过1项Linux symlink实测 |
-| 2026-08-19 | `611e2f4`（工作区） | 完成M6-B：隔离备份恢复、Release来源/secret门禁、性能与锁基线、量化扩展决策 | M6-03/04/05/06完成；M6为18/18点并完成；总体168/168点；TD-011转DEFERRED；下一建议OPS-A | Ruff、361项全量测试、85.00%合并分支覆盖率、40项M6/运维专项、Assurance 94%/Ops CLI 97%、mypy、Bandit、secret扫描、pip-audit、pip check及真实数据只读副本恢复/容量演练通过 |
+| 2026-08-19 | `228f34f` | 完成M6-B：隔离备份恢复、Release来源/secret门禁、性能与锁基线、量化扩展决策 | M6-03/04/05/06完成；M6为18/18点并完成；总体168/168点；TD-011转DEFERRED；下一建议OPS-A | Ruff、361项全量测试、85.00%合并分支覆盖率、40项M6/运维专项、Assurance 94%/Ops CLI 97%、mypy、Bandit、secret扫描、pip-audit、pip check及真实数据只读副本恢复/容量演练通过 |
+| 2026-08-19 | `228f34f`（工作区） | 把OPS-A正式拆为Ubuntu引导、真实恢复演练和容量证据复算三个工作包 | 不改变168点架构路线；新增10点运维证据阶段，部署授权与入口配置满足前保持PLANNED | 远端盘点确认Ubuntu 24.04/Python 3.12.3及空白KFCQuant环境；受审源码归档Hash一致，但隔离venv因缺少`python3.12-venv`失败；Ruff、361项全量测试、85.00%合并覆盖率和文档diff检查通过；未执行系统级部署 |
+| 2026-08-19 | `228f34f`（工作区与远端基线） | OPS-A进入真实Ubuntu取证：裸IP自签名TLS引导、Active Release健康、正式备份、timer恢复、故障注入、初始行情同步与容量基线；修复生产wheel依赖锁身份和bootstrap过早切换 | OPS-01/03为BLOCKED、OPS-02为IN_PROGRESS，OPS-A为BLOCKED且0/10点；TD-018为IN_PROGRESS；168点架构路线保持完成；锁与查询门槛已满足，恢复入口为配置LLM密钥、授权不可变发布并继续真实Job积累 | 远端服务全健康；同步后源库/备份Hash一致；timer真实触发、Schema v10恢复与坏备份失败关闭通过；初始同步386,599条日线且36份采集快照Hash全部通过；103个成功锁样本和三类查询各20次，容量决策仅缺真实Job且未改变架构；连续三次Goal续跑确认LLM密钥、提交/发布授权及真实14:40 Job仍缺失；本地Ruff、363项全量测试、85.00%分支覆盖率、mypy、Bandit、secret扫描、pip-audit、运维专项与pip check通过，Ubuntu `bash -n`通过 |
 
 ---
 

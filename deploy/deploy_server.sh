@@ -44,6 +44,7 @@ if [[ -f "$CURRENT_RELEASE/.release.env" ]]; then
   source "$CURRENT_RELEASE/.release.env"
 fi
 set +a
+cd "$CURRENT_RELEASE"
 
 if [[ "$APPROVE_IRREVERSIBLE" == true ]]; then
   exec runuser -u kfcops --preserve-environment -- "$CURRENT_RELEASE/.venv/bin/kfcops" deploy \

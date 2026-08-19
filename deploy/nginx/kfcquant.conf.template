@@ -8,8 +8,8 @@ server {
 server {
     listen 443 ssl http2;
     server_name __SERVER_IP__;
-    ssl_certificate /etc/letsencrypt/live/__SERVER_IP__/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/__SERVER_IP__/privkey.pem;
+    ssl_certificate __TLS_CERTIFICATE__;
+    ssl_certificate_key __TLS_CERTIFICATE_KEY__;
     auth_basic "KFCQuant";
     auth_basic_user_file /etc/nginx/kfcquant.htpasswd;
 

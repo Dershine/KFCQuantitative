@@ -249,6 +249,22 @@ CI同时对Research与Operations执行84%分支覆盖率门禁。类型检查覆
 sudo bash deploy/bootstrap_server.sh
 ```
 
+只有裸IP且不申请公有CA证书时，可以使用非交互自签名TLS模式；它仍会加密Basic Auth，浏览器首次访问会提示证书不受信任。不要改成公网明文HTTP：
+
+```bash
+sudo env \
+  KFCQUANT_SERVER_NAME=服务器IPv4 \
+  KFCQUANT_TLS_MODE=self-signed \
+  KFCQUANT_GENERATE_WEB_PASSWORD=true \
+  KFCQUANT_CREDENTIAL_OUTPUT=/root/kfcquant-initial-credentials \
+  bash deploy/bootstrap_server.sh
+
+sudo cat /root/kfcquant-initial-credentials
+sudo openssl x509 -in /etc/kfcquant/tls/fullchain.pem -noout -fingerprint -sha256
+```
+
+随机生成的网页凭据只写入指定的root-only文件，不进入日志或Git；读取并安全保存后应由运维者删除该交付文件。自签名模式不安装Certbot timer，证书到期前必须人工轮换；正式域名环境仍使用默认Let's Encrypt流程。
+
 初始化脚本会：
 
 1. 安装Git、Python、Nginx、Basic Auth和证书工具；

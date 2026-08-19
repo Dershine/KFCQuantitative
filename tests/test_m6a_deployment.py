@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -434,11 +435,49 @@ def test_linux_runtime_contract_points_only_at_atomic_current_release():
 
     bootstrap = (root / "deploy" / "bootstrap_server.sh").read_text(encoding="utf-8")
     deploy = (root / "deploy" / "deploy_server.sh").read_text(encoding="utf-8")
+    admin = (root / "deploy" / "kfcquant-admin").read_text(encoding="utf-8")
+    service_control = (root / "deploy" / "kfcquant-service-control").read_text(encoding="utf-8")
     assert "git -C \"$REPOSITORY_DIR\" worktree add --detach" in bootstrap
     assert "RELEASES_DIR=/opt/kfcquant/releases" in bootstrap
     assert "CURRENT_RELEASE=/opt/kfcquant/current" in bootstrap
     assert "upsert_ops_setting KFCOPS_CURRENT_RELEASE_LINK" in bootstrap
     assert "--approve-irreversible-migration" in deploy
+    assert 'cd "$CURRENT_RELEASE"' in deploy
+    assert "cd /opt/kfcquant/current" in admin
+    assert "cd /opt/kfcquant/current" in service_control
+
+
+def test_bare_ip_bootstrap_supports_unattended_self_signed_tls_without_leaking_basic_auth():
+    root = Path(__file__).parents[1]
+    bootstrap = (root / "deploy" / "bootstrap_server.sh").read_text(encoding="utf-8")
+    nginx = (root / "deploy" / "nginx" / "kfcquant.conf.template").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
+
+    assert "KFCQUANT_SERVER_NAME" in bootstrap
+    assert "KFCQUANT_TLS_MODE" in bootstrap
+    assert "KFCQUANT_GENERATE_WEB_PASSWORD" in bootstrap
+    assert "KFCQUANT_CREDENTIAL_OUTPUT" in bootstrap
+    assert "KFCQUANT_PIP_INDEX_URL" in bootstrap
+    assert "KFCQUANT_DEPENDENCY_LOCK_SHA256" in bootstrap
+    assert 'cd "$INITIAL_RELEASE"' in bootstrap
+    assert '"$PROJECT_ROOT/deploy/kfcquant-admin"' in bootstrap
+    assert '"$PROJECT_ROOT/deploy/kfcquant-service-control"' in bootstrap
+    assert 'if [[ "$TLS_MODE" == "letsencrypt" ]]' in bootstrap
+    assert 'TLS_SAN="IP:${SERVER_NAME}"' in bootstrap
+    assert '-addext "subjectAltName=$TLS_SAN"' in bootstrap
+    assert "__TLS_CERTIFICATE__" in nginx
+    assert "__TLS_CERTIFICATE_KEY__" in nginx
+    assert "/etc/letsencrypt/live/__SERVER_IP__" not in nginx
+    assert "KFCQUANT_TLS_MODE=self-signed" in readme
+    assert "/root/kfcquant-initial-credentials" in readme
+    assert "Bootstrap cannot replace an existing Active Release" in bootstrap
+    migration_command = (
+        'runuser -u kfcquant --preserve-environment -- '
+        '"$INITIAL_RELEASE/.venv/bin/kfcquant" migrate'
+    )
+    activation_command = 'ln -sfn "$INITIAL_RELEASE" "$CURRENT_RELEASE"'
+    assert bootstrap.index(migration_command) < bootstrap.index(activation_command)
+    assert 'cp "$INITIAL_RELEASE/deploy/systemd/kfcquant-worker.service"' in bootstrap
 
 
 def test_repeated_release_build_reuses_only_a_complete_immutable_release(tmp_path, monkeypatch):
@@ -524,12 +563,23 @@ def test_release_build_creates_worktree_venv_and_manifest_before_publish(tmp_pat
     )
 
     assert release == settings.releases_directory / sha
+    lock_sha256 = hashlib.sha256((release / "requirements.lock").read_bytes()).hexdigest()
     assert (release / ".release.env").read_text(encoding="utf-8").splitlines() == [
         f"KFCQUANT_SOURCE_SHA={sha}",
         "KFCQUANT_BUILD_TIME=2026-08-19T00:00:00+08:00",
         "KFCQUANT_RELEASE_MANIFEST=.release-manifest.json",
+        f"KFCQUANT_DEPENDENCY_LOCK_SHA256={lock_sha256}",
     ]
     assert json.loads((release / ".release-manifest.json").read_text(encoding="utf-8"))["source_sha"] == sha
+    release_env = release / ".release.env"
+    release_env.write_text(
+        release_env.read_text(encoding="utf-8").replace(
+            lock_sha256,
+            "7" * 64,
+        ),
+        encoding="utf-8",
+    )
+    assert manager._valid_release(release, sha) is False
     assert any(command[:2] == ("worktree", "move") for command in commands)
     assert any(command[-3:] == ("-m", "pip", "check") for command in commands)
 

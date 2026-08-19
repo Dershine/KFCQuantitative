@@ -15,4 +15,5 @@ if [[ -f /opt/kfcquant/current/.release.env ]]; then
 fi
 set +a
 
+cd /opt/kfcquant/current
 exec /usr/sbin/runuser -u kfcquant --preserve-environment -- /opt/kfcquant/current/.venv/bin/kfcquant "$@"

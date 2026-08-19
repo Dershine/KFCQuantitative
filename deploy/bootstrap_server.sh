@@ -12,21 +12,62 @@ RELEASES_DIR=/opt/kfcquant/releases
 CURRENT_RELEASE=/opt/kfcquant/current
 REPOSITORY_URL="$(git -C "$PROJECT_ROOT" remote get-url origin)"
 
-read -r -p "Public IPv4 address or domain: " SERVER_NAME
-read -r -p "Let's Encrypt email: " CERT_EMAIL
-read -r -p "Basic Auth username [kfcquant]: " WEB_USER
-WEB_USER="${WEB_USER:-kfcquant}"
-read -r -s -p "Basic Auth password: " WEB_PASSWORD
-echo
+SERVER_NAME="${KFCQUANT_SERVER_NAME:-}"
+TLS_MODE="${KFCQUANT_TLS_MODE:-letsencrypt}"
+CERT_EMAIL="${KFCQUANT_CERT_EMAIL:-}"
+WEB_USER="${KFCQUANT_WEB_USER:-kfcquant}"
+GENERATE_WEB_PASSWORD="${KFCQUANT_GENERATE_WEB_PASSWORD:-false}"
+CREDENTIAL_OUTPUT="${KFCQUANT_CREDENTIAL_OUTPUT:-/root/kfcquant-initial-credentials}"
+WEB_PASSWORD_FILE="${KFCQUANT_WEB_PASSWORD_FILE:-}"
+PIP_INDEX_URL="${KFCQUANT_PIP_INDEX_URL:-}"
+
+if [[ -z "$SERVER_NAME" ]]; then
+  read -r -p "Public IPv4 address or domain: " SERVER_NAME
+fi
+if [[ "$TLS_MODE" == "letsencrypt" && -z "$CERT_EMAIL" ]]; then
+  read -r -p "Let's Encrypt email: " CERT_EMAIL
+fi
+if [[ -n "$WEB_PASSWORD_FILE" ]]; then
+  WEB_PASSWORD="$(head -n 1 "$WEB_PASSWORD_FILE")"
+elif [[ "$GENERATE_WEB_PASSWORD" == true ]]; then
+  WEB_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+else
+  read -r -s -p "Basic Auth password: " WEB_PASSWORD
+  echo
+fi
 
 if [[ ! "$SERVER_NAME" =~ ^[A-Za-z0-9.-]+$ ]]; then
   echo "Server name must be an IPv4 address or DNS name" >&2
   exit 64
 fi
+if [[ "$TLS_MODE" != "letsencrypt" && "$TLS_MODE" != "self-signed" ]]; then
+  echo "KFCQUANT_TLS_MODE must be letsencrypt or self-signed" >&2
+  exit 64
+fi
+if [[ ! "$WEB_USER" =~ ^[A-Za-z0-9._-]+$ || -z "$WEB_PASSWORD" ]]; then
+  echo "Basic Auth username and password must be non-empty and safe" >&2
+  exit 64
+fi
+PIP_INDEX_ARGS=()
+if [[ -n "$PIP_INDEX_URL" ]]; then
+  if [[ ! "$PIP_INDEX_URL" =~ ^https://[A-Za-z0-9./_-]+$ ]]; then
+    echo "KFCQUANT_PIP_INDEX_URL must be an HTTPS package index URL" >&2
+    exit 64
+  fi
+  PIP_INDEX_ARGS=(--index-url "$PIP_INDEX_URL")
+fi
+
+if [[ "$TLS_MODE" == "self-signed" ]]; then
+  TLS_CERTIFICATE=/etc/kfcquant/tls/fullchain.pem
+  TLS_CERTIFICATE_KEY=/etc/kfcquant/tls/privkey.pem
+else
+  TLS_CERTIFICATE="/etc/letsencrypt/live/$SERVER_NAME/fullchain.pem"
+  TLS_CERTIFICATE_KEY="/etc/letsencrypt/live/$SERVER_NAME/privkey.pem"
+fi
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  git nginx apache2-utils python3 python3-venv python3-pip sudo
+  git nginx apache2-utils openssl python3 python3-venv python3-pip sudo
 systemctl enable --now nginx
 
 python3 - <<'PY'
@@ -59,6 +100,13 @@ chmod -R g+rX "$REPOSITORY_DIR"
 
 SOURCE_SHA="$(runuser -u kfcops -- git -C "$REPOSITORY_DIR" rev-parse HEAD)"
 INITIAL_RELEASE="$RELEASES_DIR/$SOURCE_SHA"
+if [[ -e "$CURRENT_RELEASE" || -L "$CURRENT_RELEASE" ]]; then
+  ACTIVE_RELEASE="$(readlink -f "$CURRENT_RELEASE" || true)"
+  if [[ "$ACTIVE_RELEASE" != "$INITIAL_RELEASE" ]]; then
+    echo "Bootstrap cannot replace an existing Active Release; use deploy_server.sh" >&2
+    exit 1
+  fi
+fi
 if [[ ! -x "$INITIAL_RELEASE/.venv/bin/kfcquant" ]]; then
   if [[ -e "$INITIAL_RELEASE" ]]; then
     echo "Incomplete initial Release already exists: $INITIAL_RELEASE" >&2
@@ -66,24 +114,25 @@ if [[ ! -x "$INITIAL_RELEASE/.venv/bin/kfcquant" ]]; then
   fi
   runuser -u kfcops -- git -C "$REPOSITORY_DIR" worktree add --detach "$INITIAL_RELEASE" "$SOURCE_SHA"
   runuser -u kfcops -- python3 -m venv "$INITIAL_RELEASE/.venv"
-  runuser -u kfcops -- "$INITIAL_RELEASE/.venv/bin/python" -m pip install --upgrade pip
   runuser -u kfcops -- "$INITIAL_RELEASE/.venv/bin/python" -m pip install \
-    --requirement "$INITIAL_RELEASE/requirements.lock"
+    "${PIP_INDEX_ARGS[@]}" --upgrade pip
+  runuser -u kfcops -- "$INITIAL_RELEASE/.venv/bin/python" -m pip install \
+    "${PIP_INDEX_ARGS[@]}" --requirement "$INITIAL_RELEASE/requirements.lock"
   runuser -u kfcops -- "$INITIAL_RELEASE/.venv/bin/python" -m pip install \
     --no-build-isolation --no-deps "$INITIAL_RELEASE"
 fi
 BUILD_TIME="$(runuser -u kfcops -- git -C "$REPOSITORY_DIR" show -s --format=%cI "$SOURCE_SHA")"
+DEPENDENCY_LOCK_SHA256="$(sha256sum "$INITIAL_RELEASE/requirements.lock" | awk '{print $1}')"
 runuser -u kfcops -- "$INITIAL_RELEASE/.venv/bin/kfcops" write-release-manifest \
   "$INITIAL_RELEASE" "$SOURCE_SHA" "$BUILD_TIME"
-printf 'KFCQUANT_SOURCE_SHA=%s\nKFCQUANT_BUILD_TIME=%s\nKFCQUANT_RELEASE_MANIFEST=.release-manifest.json\n' \
-  "$SOURCE_SHA" "$BUILD_TIME" > "$INITIAL_RELEASE/.release.env"
+printf 'KFCQUANT_SOURCE_SHA=%s\nKFCQUANT_BUILD_TIME=%s\nKFCQUANT_RELEASE_MANIFEST=.release-manifest.json\nKFCQUANT_DEPENDENCY_LOCK_SHA256=%s\n' \
+  "$SOURCE_SHA" "$BUILD_TIME" "$DEPENDENCY_LOCK_SHA256" > "$INITIAL_RELEASE/.release.env"
 chown kfcops:kfcquant "$INITIAL_RELEASE/.release.env"
 chmod 640 "$INITIAL_RELEASE/.release.env"
-ln -sfn "$INITIAL_RELEASE" "$CURRENT_RELEASE"
 
 install -d -o root -g kfcquant -m 750 /etc/kfcquant
 if [[ ! -f /etc/kfcquant/research.env ]]; then
-  cp "$CURRENT_RELEASE/deploy/server.env.example" /etc/kfcquant/research.env
+  cp "$INITIAL_RELEASE/deploy/server.env.example" /etc/kfcquant/research.env
   chmod 640 /etc/kfcquant/research.env
   chown root:kfcquant /etc/kfcquant/research.env
 fi
@@ -103,7 +152,7 @@ KFCOPS_BUILDER_PYTHON=/usr/bin/python3
 KFCOPS_SERVICE_CONTROL_COMMAND=/usr/local/sbin/kfcquant-service-control
 KFCOPS_RESEARCH_DATABASE=/var/lib/kfcquant/data/kfcquant.duckdb
 KFCOPS_RESEARCH_LOCK=/var/lib/kfcquant/runtime/database.lock
-KFCOPS_CERTIFICATE_PATH=/etc/letsencrypt/live/$SERVER_NAME/cert.pem
+KFCOPS_CERTIFICATE_PATH=$TLS_CERTIFICATE
 KFCOPS_BACKUP_DIRECTORY=/var/lib/kfcquant/backups
 KFCOPS_ASSURANCE_DIRECTORY=/var/lib/kfcops/assurance
 KFCOPS_METRICS_PATH=/var/lib/kfcquant/runtime/observability-metrics.jsonl
@@ -129,35 +178,46 @@ upsert_ops_setting KFCOPS_BUILDER_PYTHON /usr/bin/python3
 chmod 640 /etc/kfcquant/ops.env
 chown root:kfcquant /etc/kfcquant/ops.env
 
-install -o root -g root -m 755 "$CURRENT_RELEASE/deploy/kfcquant-service-control" \
+install -o root -g root -m 755 "$PROJECT_ROOT/deploy/kfcquant-service-control" \
   /usr/local/sbin/kfcquant-service-control
-install -o root -g root -m 755 "$CURRENT_RELEASE/deploy/kfcquant-admin" /usr/local/sbin/kfcquant-admin
+install -o root -g root -m 755 "$PROJECT_ROOT/deploy/kfcquant-admin" /usr/local/sbin/kfcquant-admin
 cat > /etc/sudoers.d/kfcquant-service-control <<'EOF'
 kfcops ALL=(root) NOPASSWD: /usr/local/sbin/kfcquant-service-control *
 EOF
 chmod 440 /etc/sudoers.d/kfcquant-service-control
 visudo -cf /etc/sudoers.d/kfcquant-service-control
 
-cp "$CURRENT_RELEASE/deploy/systemd/kfcquant-worker.service" /etc/systemd/system/kfcquant-worker.service
-cp "$CURRENT_RELEASE/deploy/systemd/kfcquant-web.service" /etc/systemd/system/kfcquant-web.service
-cp "$CURRENT_RELEASE/deploy/systemd/kfcops.service" /etc/systemd/system/kfcops.service
-cp "$CURRENT_RELEASE/deploy/systemd/kfcquant-assurance.service" /etc/systemd/system/kfcquant-assurance.service
-cp "$CURRENT_RELEASE/deploy/systemd/kfcquant-assurance.timer" /etc/systemd/system/kfcquant-assurance.timer
-cp "$CURRENT_RELEASE/deploy/systemd/certbot-kfcquant.service" /etc/systemd/system/certbot-kfcquant.service
-cp "$CURRENT_RELEASE/deploy/systemd/certbot-kfcquant.timer" /etc/systemd/system/certbot-kfcquant.timer
+cp "$INITIAL_RELEASE/deploy/systemd/kfcquant-worker.service" /etc/systemd/system/kfcquant-worker.service
+cp "$INITIAL_RELEASE/deploy/systemd/kfcquant-web.service" /etc/systemd/system/kfcquant-web.service
+cp "$INITIAL_RELEASE/deploy/systemd/kfcops.service" /etc/systemd/system/kfcops.service
+cp "$INITIAL_RELEASE/deploy/systemd/kfcquant-assurance.service" /etc/systemd/system/kfcquant-assurance.service
+cp "$INITIAL_RELEASE/deploy/systemd/kfcquant-assurance.timer" /etc/systemd/system/kfcquant-assurance.timer
+if [[ "$TLS_MODE" == "letsencrypt" ]]; then
+  cp "$INITIAL_RELEASE/deploy/systemd/certbot-kfcquant.service" /etc/systemd/system/certbot-kfcquant.service
+  cp "$INITIAL_RELEASE/deploy/systemd/certbot-kfcquant.timer" /etc/systemd/system/certbot-kfcquant.timer
+fi
 systemctl daemon-reload
 
 set -a
 # shellcheck disable=SC1091
 source /etc/kfcquant/research.env
 set +a
-runuser -u kfcquant --preserve-environment -- "$CURRENT_RELEASE/.venv/bin/kfcquant" migrate
+(
+  cd "$INITIAL_RELEASE"
+  runuser -u kfcquant --preserve-environment -- "$INITIAL_RELEASE/.venv/bin/kfcquant" migrate
+)
 if [[ -f /var/lib/kfcquant/data/kfcquant.duckdb ]]; then
   chmod 660 /var/lib/kfcquant/data/kfcquant.duckdb
 fi
 
 htpasswd -bc /etc/nginx/kfcquant.htpasswd "$WEB_USER" "$WEB_PASSWORD"
-cat > /etc/nginx/sites-available/kfcquant <<EOF
+if [[ "$GENERATE_WEB_PASSWORD" == true ]]; then
+  install -m 600 /dev/null "$CREDENTIAL_OUTPUT"
+  printf 'username=%s\npassword=%s\n' "$WEB_USER" "$WEB_PASSWORD" > "$CREDENTIAL_OUTPUT"
+fi
+
+if [[ "$TLS_MODE" == "letsencrypt" ]]; then
+  cat > /etc/nginx/sites-available/kfcquant <<EOF
 server {
     listen 80;
     server_name $SERVER_NAME;
@@ -165,25 +225,47 @@ server {
     location / { return 200 'KFCQuant certificate bootstrap'; add_header Content-Type text/plain; }
 }
 EOF
+  ln -sfn /etc/nginx/sites-available/kfcquant /etc/nginx/sites-enabled/kfcquant
+  rm -f /etc/nginx/sites-enabled/default
+  nginx -t
+  systemctl reload nginx
+
+  python3 -m venv /opt/certbot
+  /opt/certbot/bin/pip install "${PIP_INDEX_ARGS[@]}" --upgrade 'certbot>=5.4'
+  if [[ "$SERVER_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    /opt/certbot/bin/certbot certonly --non-interactive --agree-tos --email "$CERT_EMAIL" \
+      --preferred-profile shortlived --webroot --webroot-path /var/www/certbot --ip-address "$SERVER_NAME"
+  else
+    /opt/certbot/bin/certbot certonly --non-interactive --agree-tos --email "$CERT_EMAIL" \
+      --webroot --webroot-path /var/www/certbot -d "$SERVER_NAME"
+  fi
+else
+  install -d -o root -g kfcquant -m 750 /etc/kfcquant/tls
+  if [[ "$SERVER_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    TLS_SAN="IP:${SERVER_NAME}"
+  else
+    TLS_SAN="DNS:${SERVER_NAME}"
+  fi
+  openssl req -x509 -nodes -newkey rsa:3072 -sha256 -days 825 \
+    -keyout "$TLS_CERTIFICATE_KEY" -out "$TLS_CERTIFICATE" \
+    -subj "/CN=$SERVER_NAME" -addext "subjectAltName=$TLS_SAN"
+  chown root:kfcquant "$TLS_CERTIFICATE" "$TLS_CERTIFICATE_KEY"
+  chmod 640 "$TLS_CERTIFICATE" "$TLS_CERTIFICATE_KEY"
+fi
+
+sed -e "s|__SERVER_IP__|$SERVER_NAME|g" \
+  -e "s|__TLS_CERTIFICATE__|$TLS_CERTIFICATE|g" \
+  -e "s|__TLS_CERTIFICATE_KEY__|$TLS_CERTIFICATE_KEY|g" \
+  "$PROJECT_ROOT/deploy/nginx/kfcquant.conf.template" \
+  > /etc/nginx/sites-available/kfcquant
 ln -sfn /etc/nginx/sites-available/kfcquant /etc/nginx/sites-enabled/kfcquant
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
-systemctl reload nginx
-
-python3 -m venv /opt/certbot
-/opt/certbot/bin/pip install --upgrade 'certbot>=5.4'
-if [[ "$SERVER_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  /opt/certbot/bin/certbot certonly --non-interactive --agree-tos --email "$CERT_EMAIL" \
-    --preferred-profile shortlived --webroot --webroot-path /var/www/certbot --ip-address "$SERVER_NAME"
-else
-  /opt/certbot/bin/certbot certonly --non-interactive --agree-tos --email "$CERT_EMAIL" \
-    --webroot --webroot-path /var/www/certbot -d "$SERVER_NAME"
+ln -sfn "$INITIAL_RELEASE" "$CURRENT_RELEASE"
+systemctl enable --now kfcquant-worker kfcquant-web kfcops kfcquant-assurance.timer
+if [[ "$TLS_MODE" == "letsencrypt" ]]; then
+  systemctl enable --now certbot-kfcquant.timer
 fi
-
-sed "s/__SERVER_IP__/$SERVER_NAME/g" "$CURRENT_RELEASE/deploy/nginx/kfcquant.conf.template" \
-  > /etc/nginx/sites-available/kfcquant
-systemctl enable --now kfcquant-worker kfcquant-web kfcops certbot-kfcquant.timer kfcquant-assurance.timer
-nginx -t
 systemctl reload nginx
 
 echo "Bootstrap complete. Next:"
