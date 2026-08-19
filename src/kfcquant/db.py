@@ -12,6 +12,7 @@ import duckdb
 import pandas as pd
 from filelock import FileLock
 
+from kfcquant.application.errors import JobAlreadyRunningError, JobLeaseLostError
 from kfcquant.experiments import ExperimentRecord
 from kfcquant.ingestion import IngestionManifest, MarketDatasetKind
 from kfcquant.market_data import DAILY_BAR_SCHEMA, LIVE_QUOTE_SCHEMA, SECURITY_SCHEMA, TRADE_CALENDAR_SCHEMA
@@ -445,14 +446,6 @@ MIGRATIONS = (
         ),
     ),
 )
-
-
-class JobAlreadyRunningError(RuntimeError):
-    """Raised when a live lease already owns the same scheduled job."""
-
-
-class JobLeaseLostError(RuntimeError):
-    """Raised when a worker attempts to write after its lease expired or was recovered."""
 
 
 class Database:

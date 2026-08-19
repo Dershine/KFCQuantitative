@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 
-from kfcquant.db import Database
+from kfcquant.application.ports import NewsRepository
 from kfcquant.interfaces import LLMCallError, LLMProvider, NewsProvider
 from kfcquant.models import (
     DocumentEntity,
@@ -72,18 +72,18 @@ class NewsSyncResult:
 class NewsService:
     def __init__(
         self,
-        database: Database,
+        repository: NewsRepository,
         provider: NewsProvider,
         llm: LLMProvider | None,
         loader: DocumentLoader,
     ):
-        self.database = database
+        self.repository = repository
         self.provider = provider
         self.llm = llm
         self.loader = loader
 
     def _map_entities(self, documents: list[NewsDocument]) -> None:
-        securities = self.database.get_securities()
+        securities = self.repository.get_securities()
         names = sorted(
             (
                 (str(row["name"]), str(row["ts_code"]))
@@ -141,7 +141,7 @@ class NewsService:
             mainstream_healthy = False
             messages.append(f"主流新闻接口失败: {exc}")
         self._map_entities(documents)
-        inserted = self.database.save_news_documents(documents)
+        inserted = self.repository.save_news_documents(documents)
         processed, failed = self.process_pending()
         return NewsSyncResult(
             official_healthy=official_healthy,
@@ -156,11 +156,11 @@ class NewsService:
     def process_pending(self, limit: int = 5_000) -> tuple[int, int]:
         processed = 0
         failed = 0
-        for document in self.database.pending_news_documents(limit=limit):
+        for document in self.repository.pending_news_documents(limit=limit):
             text = f"{document.title}\n{document.content or ''}"
             extraction_keywords = RISK_KEYWORDS + POSITIVE_KEYWORDS
             if not any(keyword.upper() in text.upper() for keyword in extraction_keywords):
-                self.database.mark_document(document.document_id, "processed")
+                self.repository.mark_document(document.document_id, "processed")
                 processed += 1
                 continue
             try:
@@ -174,7 +174,7 @@ class NewsService:
                     raise RuntimeError("LLM未配置，风险公告不能安全抽取")
                 result = self.llm.extract_risk_events(document)
                 if isinstance(result, RiskExtractionResult) and result.trace is not None:
-                    self.database.complete_risk_extraction(document.document_id, result, content=content)
+                    self.repository.complete_risk_extraction(document.document_id, result, content=content)
                     LOGGER.info(
                         "risk extraction completed document_id=%s llm_call_id=%s events=%s",
                         document.document_id,
@@ -183,11 +183,11 @@ class NewsService:
                     )
                 else:
                     events = result.events if isinstance(result, RiskExtractionResult) else result
-                    self.database.save_risk_events(events)
-                    self.database.mark_document(document.document_id, "processed", content=content)
+                    self.repository.save_risk_events(events)
+                    self.repository.mark_document(document.document_id, "processed", content=content)
                 processed += 1
             except LLMCallError as exc:
-                self.database.fail_risk_extraction(document.document_id, exc.trace, content=document.content)
+                self.repository.fail_risk_extraction(document.document_id, exc.trace, content=document.content)
                 LOGGER.warning(
                     "risk extraction failed document_id=%s llm_call_id=%s error_type=%s",
                     document.document_id,
@@ -196,6 +196,6 @@ class NewsService:
                 )
                 failed += 1
             except Exception as exc:
-                self.database.mark_document(document.document_id, "failed", error=str(exc)[:1000])
+                self.repository.mark_document(document.document_id, "failed", error=str(exc)[:1000])
                 failed += 1
         return processed, failed

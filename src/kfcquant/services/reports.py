@@ -4,13 +4,13 @@ from datetime import date, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from kfcquant.db import Database
+from kfcquant.application.ports import ReportRepository
 from kfcquant.interfaces import LLMProvider
 
 
 class ReportService:
-    def __init__(self, database: Database, llm: LLMProvider | None, report_dir: Path, model_name: str):
-        self.database = database
+    def __init__(self, repository: ReportRepository, llm: LLMProvider | None, report_dir: Path, model_name: str):
+        self.repository = repository
         self.llm = llm
         self.report_dir = report_dir
         self.model_name = model_name
@@ -49,5 +49,5 @@ class ReportService:
         self.report_dir.mkdir(parents=True, exist_ok=True)
         path = self.report_dir / f"{report_date.isoformat()}-postclose.md"
         path.write_text(content, encoding="utf-8")
-        self.database.save_report(str(uuid4()), report_date, generated_at, "postclose", content, model_name)
+        self.repository.save_report(str(uuid4()), report_date, generated_at, "postclose", content, model_name)
         return content

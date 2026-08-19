@@ -1,28 +1,32 @@
 from __future__ import annotations
 
-import platform
-from datetime import date, datetime, time, timedelta
-from sys import version as PYTHON_VERSION
+from datetime import date, datetime
 from sys import version_info as PYTHON_VERSION_INFO
-from typing import Any
-from uuid import uuid4
 
-import pandas as pd
-
-from kfcquant import __version__
+from kfcquant.application.use_cases import (
+    CaptureFillUseCase,
+    DoctorUseCase,
+    EvaluateMorningUseCase,
+    EvaluatePreviousPrecloseUseCase,
+    JobController,
+    MarketBatchIngestor,
+    MonitorPaperUseCase,
+    NewsSynchronizer,
+    RecoverExpiredJobsUseCase,
+    RunManifestFactory,
+    RunMorningUseCase,
+    RunPostcloseUseCase,
+    RunPrecloseUseCase,
+    SyncCalendarUseCase,
+    SyncEodUseCase,
+    WorkflowUseCases,
+)
 from kfcquant.clock import Clock, SystemClock
 from kfcquant.config import SHANGHAI_TZ, Settings
-from kfcquant.db import Database, JobLeaseLostError
-from kfcquant.ingestion import IngestionManifest, IngestionSnapshotStore, resolve_provider_identity
+from kfcquant.db import Database
+from kfcquant.ingestion import IngestionSnapshotStore
 from kfcquant.interfaces import LiveQuoteProvider, LLMProvider, MarketDataProvider, NewsProvider
-from kfcquant.market_data import (
-    DAILY_BAR_SCHEMA,
-    LIVE_QUOTE_SCHEMA,
-    SECURITY_SCHEMA,
-    TRADE_CALENDAR_SCHEMA,
-    MarketTableSchema,
-)
-from kfcquant.models import ResearchRunState, RunStatus, SignalKind, SignalRun
+from kfcquant.models import SignalKind, SignalRun
 from kfcquant.point_in_time import PointInTimeDataGateway
 from kfcquant.providers.document_loader import DocumentLoader
 from kfcquant.providers.factory import (
@@ -31,31 +35,19 @@ from kfcquant.providers.factory import (
     build_market_provider,
     build_news_provider,
 )
-from kfcquant.run_manifest import (
-    ResearchRunManifest,
-    RunInputSnapshot,
-    RunInputSnapshotStore,
-)
-from kfcquant.runtime import build_identity
+from kfcquant.repositories import DuckDBRepositories
+from kfcquant.run_manifest import RunInputSnapshotStore
 from kfcquant.services.evaluation import CandidateEvaluationService
-from kfcquant.services.news import NewsService, NewsSyncResult
+from kfcquant.services.news import NewsService
 from kfcquant.services.portfolio import PortfolioService
 from kfcquant.services.reports import ReportService
-from kfcquant.strategy import (
-    StrategyExecutionRunner,
-    StrategyRegistry,
-    build_default_strategy_registry,
-)
-from kfcquant.unit_of_work import (
-    DuckDBResearchRunUnitOfWork,
-    JobCompletion,
-    ResearchRunUnitOfWork,
-)
-
-MINIMUM_PYTHON_VERSION = (3, 12)
+from kfcquant.strategy import StrategyExecutionRunner, StrategyRegistry, build_default_strategy_registry
+from kfcquant.unit_of_work import DuckDBResearchRunUnitOfWork, ResearchRunUnitOfWork
 
 
 class Workflow:
+    """Backward-compatible facade over independently testable application use cases."""
+
     def __init__(
         self,
         settings: Settings,
@@ -77,6 +69,7 @@ class Workflow:
             settings.runtime_dir / "database.lock",
         )
         self.database.initialize()
+        self.repositories = DuckDBRepositories(self.database)
         self.snapshot_store = IngestionSnapshotStore(settings.raw_data_dir)
         self.run_input_store = RunInputSnapshotStore(settings.raw_data_dir)
         self.point_in_time = PointInTimeDataGateway(self.run_input_store, self.clock)
@@ -88,14 +81,15 @@ class Workflow:
             and market_provider is not None
             and hasattr(market_provider, "fetch_official_documents")
         ):
-            self._news_provider = market_provider  # Backward-compatible composite test/provider.
+            self._news_provider = market_provider
         self._llm_provider = llm_provider
         self.strategy_registry = strategy_registry or build_default_strategy_registry(settings)
         self.strategy_registry.require((SignalKind.MORNING_WATCHLIST, SignalKind.PRECLOSE_ENTRY))
         self.strategy_runner = StrategyExecutionRunner(self.strategy_registry)
-        self.portfolio = PortfolioService(self.database, settings, self.live_provider)
-        self.evaluation = CandidateEvaluationService(self.database, settings, self.live_provider)
+        self.portfolio = PortfolioService(self.repositories.portfolio, settings, self.live_provider)
+        self.evaluation = CandidateEvaluationService(self.repositories.evaluation, settings, self.live_provider)
         self.run_uow = run_uow or DuckDBResearchRunUnitOfWork(self.database)
+        self.use_cases = self._build_use_cases()
 
     @property
     def market_provider(self) -> MarketDataProvider:
@@ -121,723 +115,134 @@ class Workflow:
         except Exception:
             return None
 
-    @staticmethod
-    def _validated_market_frame(schema: MarketTableSchema, frame: pd.DataFrame) -> pd.DataFrame:
-        """Recheck injected and production providers at the workflow trust boundary."""
-        return schema.validate(frame).frame
-
-    def _ingest_market_batch(
-        self,
-        schema: MarketTableSchema,
-        frame: pd.DataFrame,
-        provider: object,
-        job_run_id: str,
-    ) -> IngestionManifest:
-        validated = schema.validate(frame)
-        identity = resolve_provider_identity(provider, validated)
-        manifest = self.snapshot_store.capture(
-            validated,
-            identity,
-            self.clock.now(),
-            job_run_id,
+    def _build_use_cases(self) -> WorkflowUseCases:
+        jobs = JobController(self.repositories.jobs, self.settings, self.clock)
+        ingestor = MarketBatchIngestor(self.repositories.market, self.snapshot_store, self.clock)
+        manifests = RunManifestFactory(self.clock)
+        news = NewsSynchronizer(
+            lambda: NewsService(
+                self.repositories.news,
+                self.news_provider,
+                self.optional_llm(),
+                DocumentLoader(self.settings.max_document_bytes),
+            )
         )
-        self.database.ingest_market_batch(validated.frame, manifest)
-        return manifest
-
-    def _job_start(self, name: str, at: datetime) -> str:
-        job_id = str(uuid4())
-        self.database.start_job(job_id, name, at, timedelta(seconds=self.settings.job_lease_seconds))
-        return job_id
-
-    def _job_heartbeat(self, job_id: str) -> datetime:
-        heartbeat_at = self.clock.now()
-        renewed = self.database.heartbeat_job(
-            job_id,
-            heartbeat_at,
-            timedelta(seconds=self.settings.job_lease_seconds),
+        evaluate_morning = EvaluateMorningUseCase(self.repositories.research, self.evaluation, jobs, self.clock)
+        evaluate_previous = EvaluatePreviousPrecloseUseCase(
+            self.repositories.research,
+            self.evaluation,
+            self.clock,
         )
-        if not renewed:
-            raise JobLeaseLostError(f"job lease is no longer active: {job_id}")
-        return heartbeat_at
-
-    def recover_expired_jobs(self, at: datetime | None = None) -> list[str]:
-        return self.database.recover_expired_jobs(at or self.clock.now())
-
-    def _job_finish(
-        self, job_id: str, name: str, started: datetime, status: str, message: str, **metadata: Any
-    ) -> None:
-        del name, started
-        finished_at = self._job_heartbeat(job_id)
-        self.database.finish_job(job_id, finished_at, status, message, metadata)
-
-    def _job_completion(
-        self,
-        job_id: str,
-        name: str,
-        started: datetime,
-        status: str,
-        message: str,
-        **metadata: Any,
-    ) -> JobCompletion:
-        finished_at = self._job_heartbeat(job_id)
-        return JobCompletion(
-            job_run_id=job_id,
-            job_name=name,
-            started_at=started,
-            finished_at=finished_at,
-            status=status,
-            message=message,
-            metadata=metadata,
-        )
-
-    def _run_manifest(
-        self,
-        run: SignalRun,
-        snapshots: tuple[RunInputSnapshot, ...],
-        result_sha256: str,
-    ) -> ResearchRunManifest:
-        identity = build_identity()
-        return ResearchRunManifest.create(
-            run,
-            snapshots,
-            result_sha256,
-            source_sha=str(identity["source_sha"]),
-            source_dirty=bool(identity["source_dirty"]),
-            project_version=__version__,
-            python_version=platform.python_version(),
-            dependency_lock_sha256=str(identity["dependency_lock_sha256"]),
-            created_at=self.clock.now(),
+        return WorkflowUseCases(
+            doctor=DoctorUseCase(
+                self.settings,
+                self.clock,
+                lambda: self.market_provider,
+                self.live_provider,
+                lambda: self.news_provider,
+                lambda: self.llm_provider,
+                PYTHON_VERSION_INFO,
+            ),
+            sync_eod=SyncEodUseCase(lambda: self.market_provider, ingestor, jobs, self.clock),
+            sync_calendar=SyncCalendarUseCase(
+                self.repositories.market,
+                lambda: self.market_provider,
+                ingestor,
+                jobs,
+                self.clock,
+            ),
+            run_preclose=RunPrecloseUseCase(
+                self.settings,
+                self.repositories.research,
+                self.live_provider,
+                news,
+                ingestor,
+                self.point_in_time,
+                self.strategy_registry,
+                self.strategy_runner,
+                self.portfolio,
+                self.run_uow,
+                manifests,
+                jobs,
+                self.clock,
+            ),
+            run_morning=RunMorningUseCase(
+                self.settings,
+                self.repositories.research,
+                news,
+                self.point_in_time,
+                self.strategy_registry,
+                self.strategy_runner,
+                self.run_uow,
+                manifests,
+                jobs,
+                self.clock,
+            ),
+            evaluate_morning=evaluate_morning,
+            evaluate_previous_preclose=evaluate_previous,
+            capture_fill=CaptureFillUseCase(
+                self.settings,
+                self.repositories.research,
+                self.live_provider,
+                ingestor,
+                self.portfolio,
+                jobs,
+                self.clock,
+            ),
+            monitor_paper=MonitorPaperUseCase(
+                self.settings,
+                self.repositories.research,
+                self.portfolio,
+                jobs,
+                self.clock,
+            ),
+            run_postclose=RunPostcloseUseCase(
+                self.settings,
+                self.repositories.research,
+                news,
+                evaluate_morning,
+                evaluate_previous,
+                lambda: ReportService(
+                    self.repositories.report,
+                    self.optional_llm(),
+                    self.settings.report_dir,
+                    self.settings.llm_report_model,
+                ),
+                jobs,
+                self.clock,
+            ),
+            recover_expired_jobs=RecoverExpiredJobsUseCase(self.repositories.jobs, self.clock),
         )
 
     def doctor(self, online: bool = False) -> list[dict[str, object]]:
-        checks: list[dict[str, object]] = []
-        checks.append(
-            {
-                "check": "python",
-                "ok": PYTHON_VERSION_INFO >= MINIMUM_PYTHON_VERSION,
-                "detail": PYTHON_VERSION.split()[0],
-            }
-        )
-        checks.append(
-            {
-                "check": "database",
-                "ok": self.settings.database_path.parent.exists(),
-                "detail": str(self.settings.database_path),
-            }
-        )
-        checks.append({"check": "data-profile", "ok": True, "detail": self.settings.data_profile})
-        checks.append(
-            {
-                "check": "market-provider",
-                "ok": self.settings.market_provider.lower() in {"baostock", "tushare"},
-                "detail": self.settings.market_provider,
-            }
-        )
-        checks.append(
-            {
-                "check": "news-provider",
-                "ok": self.settings.news_provider.lower() in {"akshare", "tushare"},
-                "detail": self.settings.news_provider,
-            }
-        )
-        if "tushare" in {self.settings.market_provider.lower(), self.settings.news_provider.lower()}:
-            checks.append(
-                {
-                    "check": "TUSHARE_TOKEN",
-                    "ok": bool(self.settings.tushare_token),
-                    "detail": "configured" if self.settings.tushare_token else "missing",
-                }
-            )
-        checks.append(
-            {
-                "check": "LLM_API_KEY",
-                "ok": bool(self.settings.llm_api_key),
-                "detail": "configured" if self.settings.llm_api_key else "missing",
-            }
-        )
-        modules = {"duckdb", "pandas", "streamlit", "openai", "pyarrow"}
-        if self.settings.market_provider.lower() == "baostock":
-            modules.add("baostock")
-        if self.settings.market_provider.lower() == "tushare" or self.settings.news_provider.lower() == "tushare":
-            modules.add("tushare")
-        if self.settings.live_provider.lower() == "akshare" or self.settings.news_provider.lower() == "akshare":
-            modules.add("akshare")
-        for module in sorted(modules):
-            try:
-                __import__(module)
-                checks.append({"check": f"module:{module}", "ok": True, "detail": "available"})
-            except Exception as exc:
-                checks.append({"check": f"module:{module}", "ok": False, "detail": str(exc)})
-        if online:
-            try:
-                today = self.clock.now().date()
-                frame = self._validated_market_frame(
-                    TRADE_CALENDAR_SCHEMA,
-                    self.market_provider.fetch_trade_calendar(today - timedelta(days=2), today),
-                )
-                checks.append(
-                    {
-                        "check": f"{self.settings.market_provider}-online",
-                        "ok": not frame.empty,
-                        "detail": f"{len(frame)} calendar rows",
-                    }
-                )
-            except Exception as exc:
-                checks.append({"check": f"{self.settings.market_provider}-online", "ok": False, "detail": str(exc)})
-            try:
-                frame = self._validated_market_frame(LIVE_QUOTE_SCHEMA, self.live_provider.fetch_quotes())
-                checks.append({"check": "akshare-online", "ok": not frame.empty, "detail": f"{len(frame)} quotes"})
-            except Exception as exc:
-                checks.append({"check": "akshare-online", "ok": False, "detail": str(exc)})
-            try:
-                now = self.clock.now()
-                documents = self.news_provider.fetch_official_documents(now - timedelta(days=1), now)
-                checks.append(
-                    {
-                        "check": f"{self.settings.news_provider}-announcements-online",
-                        "ok": True,
-                        "detail": f"reachable; {len(documents)} dated documents",
-                    }
-                )
-            except Exception as exc:
-                checks.append(
-                    {"check": f"{self.settings.news_provider}-announcements-online", "ok": False, "detail": str(exc)}
-                )
-            if self.settings.llm_api_key:
-                try:
-                    provider = self.llm_provider
-                    healthcheck = getattr(provider, "healthcheck", None)
-                    detail = healthcheck() if healthcheck else "provider created"
-                    checks.append({"check": f"{self.settings.llm_provider}-online", "ok": True, "detail": detail})
-                except Exception as exc:
-                    checks.append({"check": f"{self.settings.llm_provider}-online", "ok": False, "detail": str(exc)})
-        return checks
+        return self.use_cases.doctor.execute(online)
 
     def sync_eod(self, start: date, end: date) -> dict[str, object]:
-        started = self.clock.now()
-        job_id = self._job_start("sync-eod", started)
-        try:
-            securities = self._validated_market_frame(SECURITY_SCHEMA, self.market_provider.fetch_securities())
-            self._job_heartbeat(job_id)
-            manifests = [self._ingest_market_batch(SECURITY_SCHEMA, securities, self.market_provider, job_id)]
-            calendar = self._validated_market_frame(
-                TRADE_CALENDAR_SCHEMA, self.market_provider.fetch_trade_calendar(start, end)
-            )
-            self._job_heartbeat(job_id)
-            manifests.append(
-                self._ingest_market_batch(TRADE_CALENDAR_SCHEMA, calendar, self.market_provider, job_id)
-            )
-            open_dates = [row["cal_date"] for row in calendar.to_dict("records") if bool(row["is_open"])]
-            rows = 0
-            range_loader = getattr(self.market_provider, "iter_daily_range", None)
-            if range_loader:
-                list_dates = pd.to_datetime(securities["list_date"], errors="coerce")
-                delist_dates = pd.to_datetime(securities["delist_date"], errors="coerce")
-                eligible = securities[
-                    (list_dates <= pd.Timestamp(end)) & (delist_dates.isna() | (delist_dates >= pd.Timestamp(start)))
-                ]
-                for frame in range_loader(start, end, eligible["ts_code"].astype(str).tolist()):
-                    frame = self._validated_market_frame(DAILY_BAR_SCHEMA, frame)
-                    self._job_heartbeat(job_id)
-                    manifests.append(
-                        self._ingest_market_batch(DAILY_BAR_SCHEMA, frame, self.market_provider, job_id)
-                    )
-                    rows += len(frame)
-            else:
-                for trade_date in open_dates:
-                    frame = self._validated_market_frame(
-                        DAILY_BAR_SCHEMA, self.market_provider.fetch_daily(trade_date)
-                    )
-                    self._job_heartbeat(job_id)
-                    manifests.append(
-                        self._ingest_market_batch(DAILY_BAR_SCHEMA, frame, self.market_provider, job_id)
-                    )
-                    rows += len(frame)
-            message = f"synced {len(open_dates)} trading days and {rows} bars"
-            self._job_finish(
-                job_id,
-                "sync-eod",
-                started,
-                "success",
-                message,
-                bars=rows,
-                ingestion_batches=len(manifests),
-            )
-            return {
-                "trading_days": len(open_dates),
-                "bars": rows,
-                "securities": len(securities),
-                "ingestion_batches": len(manifests),
-            }
-        except Exception as exc:
-            self._job_finish(job_id, "sync-eod", started, "failed", str(exc))
-            raise
+        return self.use_cases.sync_eod.execute(start, end)
 
     def sync_calendar(self, at: datetime | None = None) -> dict[str, object]:
-        at = at or self.clock.now()
-        started = self.clock.now()
-        job_id = self._job_start("sync-calendar", started)
-        try:
-            frame = self._validated_market_frame(
-                TRADE_CALENDAR_SCHEMA,
-                self.market_provider.fetch_trade_calendar(
-                    at.date() - timedelta(days=10), at.date() + timedelta(days=10)
-                ),
-            )
-            self._job_heartbeat(job_id)
-            manifest = self._ingest_market_batch(TRADE_CALENDAR_SCHEMA, frame, self.market_provider, job_id)
-            confirmed = self.database.is_trading_day(at.date()) or bool(
-                not frame.empty and (pd.to_datetime(frame["cal_date"]).dt.date == at.date()).any()
-            )
-            message = f"synced {len(frame)} calendar rows; today_confirmed={confirmed}"
-            self._job_finish(
-                job_id,
-                "sync-calendar",
-                started,
-                "success",
-                message,
-                ingestion_batch_id=manifest.batch_id,
-            )
-            return {"rows": len(frame), "today_confirmed": confirmed, "ingestion_batch_id": manifest.batch_id}
-        except Exception as exc:
-            self._job_finish(job_id, "sync-calendar", started, "failed", str(exc))
-            raise
-
-    def _sync_news(self, start: datetime, end: datetime) -> NewsSyncResult:
-        try:
-            provider = self.news_provider
-        except Exception as exc:
-            return NewsSyncResult(False, False, 0, 0, 0, 0, [str(exc)])
-        service = NewsService(
-            self.database,
-            provider,
-            self.optional_llm(),
-            DocumentLoader(self.settings.max_document_bytes),
-        )
-        return service.sync(start, end)
+        return self.use_cases.sync_calendar.execute(at)
 
     def run_preclose(self, as_of: datetime | None = None, research_outside_window: bool = False) -> SignalRun:
-        as_of = as_of or self.clock.now()
-        if as_of.tzinfo is None:
-            as_of = as_of.replace(tzinfo=SHANGHAI_TZ)
-        strategy = self.strategy_registry.resolve(SignalKind.PRECLOSE_ENTRY)
-        started = self.clock.now()
-        job_id = self._job_start("run-preclose", started)
-        window_ok = self.settings.schedule.preclose_window.contains(as_of)
-        trading_day = self.database.is_trading_day(as_of.date())
-        if not trading_day:
-            run = SignalRun(
-                **strategy.identity.attribution_fields(),
-                as_of=as_of,
-                signal_kind=SignalKind.PRECLOSE_ENTRY,
-                information_cutoff=as_of,
-                status=RunStatus.MISSED,
-                data_fresh=False,
-                official_news_healthy=False,
-                mainstream_news_healthy=False,
-                tradable=False,
-                message="交易日历未确认当日开市，禁止生成尾盘信号",
-            )
-            self.run_uow.commit(
-                run,
-                [],
-                [],
-                self._job_completion(job_id, "run-preclose", started, "missed", run.message),
-            )
-            return run
-        if not window_ok and not research_outside_window:
-            run = SignalRun(
-                **strategy.identity.attribution_fields(),
-                as_of=as_of,
-                signal_kind=SignalKind.PRECLOSE_ENTRY,
-                information_cutoff=as_of,
-                status=RunStatus.MISSED,
-                data_fresh=False,
-                official_news_healthy=False,
-                mainstream_news_healthy=False,
-                tradable=False,
-                message=f"不在{self.settings.schedule.preclose_window.describe()}窗口内，禁止补造尾盘信号",
-            )
-            self.run_uow.commit(
-                run,
-                [],
-                [],
-                self._job_completion(job_id, "run-preclose", started, "missed", run.message),
-            )
-            return run
-        try:
-            draft = SignalRun(
-                **strategy.identity.attribution_fields(),
-                as_of=as_of,
-                signal_kind=SignalKind.PRECLOSE_ENTRY,
-                information_cutoff=as_of,
-                status=RunStatus.RUNNING,
-                lifecycle_state=ResearchRunState.CREATED,
-                data_fresh=False,
-                official_news_healthy=False,
-                mainstream_news_healthy=False,
-                tradable=False,
-            ).transition_to(ResearchRunState.COLLECTING_DATA)
-            quotes = self._validated_market_frame(LIVE_QUOTE_SCHEMA, self.live_provider.fetch_quotes())
-            self._job_heartbeat(job_id)
-            quote_manifest = self._ingest_market_batch(
-                LIVE_QUOTE_SCHEMA, quotes, self.live_provider, job_id
-            )
-            quote_times = (
-                pd.to_datetime(quotes["captured_at"], utc=True)
-                if not quotes.empty
-                else pd.Series(dtype="datetime64[ns, UTC]")
-            )
-            as_of_utc = pd.Timestamp(as_of).tz_convert("UTC")
-            data_fresh = not quotes.empty and bool(
-                ((as_of_utc - quote_times).abs().dt.total_seconds() <= self.settings.quote_freshness_seconds).all()
-            )
-
-            news_fetch_start = datetime.combine((as_of - timedelta(days=10)).date(), time(0, 0), tzinfo=SHANGHAI_TZ)
-            news = self._sync_news(news_fetch_start, as_of)
-            self._job_heartbeat(job_id)
-            bars = self.database.get_recent_daily_bars(150, as_of=as_of.date() - timedelta(days=1))
-            expected_eod = self.database.previous_trading_day(as_of.date())
-            latest_eod = pd.to_datetime(bars["trade_date"], errors="coerce").max() if not bars.empty else pd.NaT
-            eod_fresh = bool(expected_eod and not pd.isna(latest_eod) and latest_eod.date() == expected_eod)
-            securities = self.database.get_securities()
-            risk_start_date = self.database.trading_day_lookback(
-                as_of.date(), self.settings.news_lookback_trading_days
-            ) or (as_of.date() - timedelta(days=10))
-            risk_start = datetime.combine(risk_start_date, time(0, 0), tzinfo=SHANGHAI_TZ)
-            events = self.database.get_risk_events(risk_start, as_of)
-            unprocessed = self.database.unprocessed_official_codes(risk_start, as_of)
-
-            provisional = draft.model_copy(
-                update={
-                    "data_as_of": as_of if data_fresh else None,
-                    "data_fresh": data_fresh,
-                    "official_news_healthy": news.official_healthy,
-                    "mainstream_news_healthy": news.mainstream_healthy,
-                }
-            ).transition_to(ResearchRunState.EVALUATING)
-            morning_run = self.database.latest_signal_run(as_of.date(), SignalKind.MORNING_WATCHLIST.value)
-            morning_codes: set[str] = set()
-            morning_as_of: datetime | None = None
-            if morning_run:
-                morning_as_of = morning_run["as_of"]
-                morning_frame = self.settings.selection.select_frame(
-                    self.database.get_candidates(str(morning_run["run_id"]), include_blocked=True)
-                )
-                morning_codes = set(morning_frame["ts_code"].astype(str)) if not morning_frame.empty else set()
-            point_in_time = self.point_in_time.build_context(
-                run_id=provisional.run_id,
-                signal_kind=SignalKind.PRECLOSE_ENTRY,
-                as_of=as_of,
-                information_cutoff=provisional.information_cutoff or as_of,
-                securities=securities,
-                bars=bars,
-                quotes=quotes,
-                risk_events=events,
-                unprocessed_official_codes=frozenset(unprocessed),
-                previous_signal_codes=frozenset(morning_codes),
-                previous_signal_as_of=morning_as_of,
-                quote_ingestion_manifest=quote_manifest,
-            )
-            execution = self.strategy_runner.execute(
-                point_in_time.context,
-                expected_identity=strategy.identity,
-            )
-            scored = execution.result
-            self._job_heartbeat(job_id)
-            selected = self.settings.selection.select_candidates(scored.candidates)
-            tradable = window_ok and data_fresh and eod_fresh and news.official_healthy and bool(selected)
-            status = RunStatus.SUCCESS if tradable and news.mainstream_healthy else RunStatus.DEGRADED
-            message_parts = news.messages.copy()
-            if not data_fresh:
-                message_parts.append(f"实时行情缺失或超过{self.settings.quote_freshness_seconds}秒")
-            if not eod_fresh:
-                message_parts.append(f"正式日线未更新到前一交易日 {expected_eod or 'unknown'}")
-            if research_outside_window and not window_ok:
-                message_parts.append("窗口外研究运行，不生成模拟订单")
-            staged = provisional.model_copy(
-                update={
-                    "status": status,
-                    "tradable": tradable,
-                    "message": "; ".join(message_parts) or "ok",
-                    "candidate_count": len([candidate for candidate in scored.candidates if not candidate.blocked]),
-                    "metadata": {
-                        "eligible_count": scored.eligible_count,
-                        "exclusion_counts": scored.exclusion_counts,
-                        "eod_fresh": eod_fresh,
-                        "expected_eod": str(expected_eod) if expected_eod else None,
-                        "news": news.__dict__,
-                    },
-                }
-            ).transition_to(ResearchRunState.STAGED)
-            run = staged.transition_to(ResearchRunState.PUBLISHED)
-            orders = self.portfolio.plan_candidate_orders(run, scored.candidates)
-            manifest = self._run_manifest(
-                run,
-                point_in_time.snapshots,
-                execution.result_sha256,
-            )
-            self.run_uow.commit(
-                run,
-                scored.candidates,
-                orders,
-                self._job_completion(
-                    job_id,
-                    "run-preclose",
-                    started,
-                    status.value,
-                    run.message,
-                    candidates=run.candidate_count,
-                    orders=len(orders),
-                    tradable=run.tradable,
-                ),
-                manifest,
-            )
-            return run
-        except Exception as exc:
-            self._job_finish(job_id, "run-preclose", started, "failed", str(exc))
-            raise
+        return self.use_cases.run_preclose.execute(as_of, research_outside_window)
 
     def run_morning(self, as_of: datetime | None = None, research_outside_window: bool = False) -> SignalRun:
-        as_of = as_of or self.clock.now()
-        if as_of.tzinfo is None:
-            as_of = as_of.replace(tzinfo=SHANGHAI_TZ)
-        strategy = self.strategy_registry.resolve(SignalKind.MORNING_WATCHLIST)
-        started = self.clock.now()
-        job_id = self._job_start("run-morning", started)
-        window_ok = self.settings.schedule.morning_window.contains(as_of)
-        if not self.database.is_trading_day(as_of.date()) or (not window_ok and not research_outside_window):
-            message = (
-                "交易日历未确认当日开市"
-                if not self.database.is_trading_day(as_of.date())
-                else f"不在{self.settings.schedule.morning_window.describe()}窗口内"
-            )
-            run = SignalRun(
-                **strategy.identity.attribution_fields(),
-                as_of=as_of,
-                signal_kind=SignalKind.MORNING_WATCHLIST,
-                information_cutoff=as_of,
-                status=RunStatus.MISSED,
-                data_fresh=False,
-                official_news_healthy=False,
-                mainstream_news_healthy=False,
-                tradable=False,
-                message=message,
-            )
-            self.run_uow.commit(
-                run,
-                [],
-                [],
-                self._job_completion(job_id, "run-morning", started, "missed", message),
-            )
-            return run
-        try:
-            draft = SignalRun(
-                **strategy.identity.attribution_fields(),
-                as_of=as_of,
-                signal_kind=SignalKind.MORNING_WATCHLIST,
-                information_cutoff=as_of,
-                status=RunStatus.RUNNING,
-                lifecycle_state=ResearchRunState.CREATED,
-                data_fresh=False,
-                official_news_healthy=False,
-                mainstream_news_healthy=False,
-                tradable=False,
-            ).transition_to(ResearchRunState.COLLECTING_DATA)
-            news_start = datetime.combine((as_of - timedelta(days=10)).date(), time(0), tzinfo=SHANGHAI_TZ)
-            news = self._sync_news(news_start, as_of)
-            self._job_heartbeat(job_id)
-            bars = self.database.get_recent_daily_bars(150, as_of=as_of.date() - timedelta(days=1))
-            expected_eod = self.database.previous_trading_day(as_of.date())
-            latest_eod = pd.to_datetime(bars["trade_date"], errors="coerce").max() if not bars.empty else pd.NaT
-            eod_fresh = bool(expected_eod and not pd.isna(latest_eod) and latest_eod.date() == expected_eod)
-            risk_start_date = self.database.trading_day_lookback(as_of.date(), self.settings.news_lookback_trading_days)
-            risk_start = datetime.combine(
-                risk_start_date or (as_of.date() - timedelta(days=10)), time(0), tzinfo=SHANGHAI_TZ
-            )
-            events = self.database.get_risk_events(risk_start, as_of)
-            unprocessed = self.database.unprocessed_official_codes(risk_start, as_of)
-            provisional = draft.model_copy(
-                update={
-                    "data_as_of": datetime.combine(
-                        expected_eod, self.settings.schedule.market_close, tzinfo=SHANGHAI_TZ
-                    )
-                    if expected_eod
-                    else None,
-                    "data_fresh": eod_fresh,
-                    "official_news_healthy": news.official_healthy,
-                    "mainstream_news_healthy": news.mainstream_healthy,
-                }
-            ).transition_to(ResearchRunState.EVALUATING)
-            point_in_time = self.point_in_time.build_context(
-                run_id=provisional.run_id,
-                signal_kind=SignalKind.MORNING_WATCHLIST,
-                as_of=as_of,
-                information_cutoff=provisional.information_cutoff or as_of,
-                securities=self.database.get_securities(),
-                bars=bars,
-                risk_events=events,
-                unprocessed_official_codes=frozenset(unprocessed),
-            )
-            execution = self.strategy_runner.execute(
-                point_in_time.context,
-                expected_identity=strategy.identity,
-            )
-            scored = execution.result
-            self._job_heartbeat(job_id)
-            status = RunStatus.SUCCESS if eod_fresh and news.official_healthy else RunStatus.DEGRADED
-            messages = list(news.messages)
-            if not eod_fresh:
-                messages.append(f"正式日线未更新到前一交易日 {expected_eod or 'unknown'}")
-            if research_outside_window and not window_ok:
-                messages.append("窗口外研究运行")
-            staged = provisional.model_copy(
-                update={
-                    "status": status,
-                    "message": "; ".join(messages) or "ok",
-                    "candidate_count": len([item for item in scored.candidates if not item.blocked]),
-                    "metadata": {
-                        "eligible_count": scored.eligible_count,
-                        "news": news.__dict__,
-                        "eod_fresh": eod_fresh,
-                    },
-                }
-            ).transition_to(ResearchRunState.STAGED)
-            run = staged.transition_to(ResearchRunState.PUBLISHED)
-            manifest = self._run_manifest(
-                run,
-                point_in_time.snapshots,
-                execution.result_sha256,
-            )
-            self.run_uow.commit(
-                run,
-                scored.candidates,
-                [],
-                self._job_completion(
-                    job_id,
-                    "run-morning",
-                    started,
-                    status.value,
-                    run.message,
-                    candidates=run.candidate_count,
-                ),
-                manifest,
-            )
-            return run
-        except Exception as exc:
-            self._job_finish(job_id, "run-morning", started, "failed", str(exc))
-            raise
+        return self.use_cases.run_morning.execute(as_of, research_outside_window)
 
     def evaluate_morning(self, at: datetime | None = None) -> list[object]:
-        at = at or self.clock.now()
-        started = self.clock.now()
-        job_id = self._job_start("evaluate-morning", started)
-        try:
-            run = self.database.latest_signal_run(at.date(), SignalKind.MORNING_WATCHLIST.value)
-            outcomes = self.evaluation.evaluate(run, at) if run and run["status"] in {"success", "degraded"} else []
-            self._job_finish(job_id, "evaluate-morning", started, "success", f"evaluated {len(outcomes)} candidates")
-            return outcomes
-        except Exception as exc:
-            self._job_finish(job_id, "evaluate-morning", started, "failed", str(exc))
-            raise
+        return self.use_cases.evaluate_morning.execute(at)
 
     def evaluate_previous_preclose(self, at: datetime | None = None) -> list[object]:
-        at = at or self.clock.now()
-        previous = self.database.previous_trading_day(at.date())
-        run = self.database.latest_signal_run(previous, SignalKind.PRECLOSE_ENTRY.value) if previous else None
-        return self.evaluation.evaluate(run, at) if run and run["status"] in {"success", "degraded"} else []
+        return self.use_cases.evaluate_previous_preclose.execute(at)
 
     def capture_fill(self, at: datetime | None = None) -> list[object]:
-        at = at or self.clock.now()
-        if at.tzinfo is None:
-            at = at.replace(tzinfo=SHANGHAI_TZ)
-        started = self.clock.now()
-        job_id = self._job_start("capture-fill", started)
-        if not self.settings.schedule.fill_window.contains(at):
-            self._job_finish(
-                job_id,
-                "capture-fill",
-                started,
-                "missed",
-                f"不在{self.settings.schedule.fill_window.describe()}成交窗口",
-            )
-            return []
-        try:
-            run = self.database.latest_signal_run(at.date(), SignalKind.PRECLOSE_ENTRY.value)
-            if not run or not bool(run["tradable"]):
-                self._job_finish(job_id, "capture-fill", started, "degraded", "没有可交易的当日信号")
-                return []
-            quotes = self._validated_market_frame(LIVE_QUOTE_SCHEMA, self.live_provider.fetch_quotes())
-            self._job_heartbeat(job_id)
-            self._ingest_market_batch(LIVE_QUOTE_SCHEMA, quotes, self.live_provider, job_id)
-            fills = self.portfolio.capture_buy_fills(str(run["run_id"]), at, quotes)
-            self._job_finish(job_id, "capture-fill", started, "success", f"filled {len(fills)} orders")
-            return fills
-        except Exception as exc:
-            self._job_finish(job_id, "capture-fill", started, "failed", str(exc))
-            raise
-
-    def _in_trading_session(self, at: datetime) -> bool:
-        return self.settings.schedule.is_trading_session(at)
+        return self.use_cases.capture_fill.execute(at)
 
     def monitor_paper(self, at: datetime | None = None) -> list[object]:
-        at = at or self.clock.now()
-        if at.tzinfo is None:
-            at = at.replace(tzinfo=SHANGHAI_TZ)
-        started = self.clock.now()
-        job_id = self._job_start("monitor-paper", started)
-        if not self.database.is_trading_day(at.date()) or not self._in_trading_session(at):
-            self._job_finish(job_id, "monitor-paper", started, "success", "outside trading session; no-op")
-            return []
-        try:
-            self._job_heartbeat(job_id)
-            fills = self.portfolio.monitor_positions(at)
-            self._job_finish(job_id, "monitor-paper", started, "success", f"closed {len(fills)} positions")
-            return fills
-        except Exception as exc:
-            self._job_finish(job_id, "monitor-paper", started, "failed", str(exc))
-            raise
+        return self.use_cases.monitor_paper.execute(at)
 
     def run_postclose(self, at: datetime | None = None) -> str:
-        at = at or self.clock.now()
-        if at.tzinfo is None:
-            at = at.replace(tzinfo=SHANGHAI_TZ)
-        started = self.clock.now()
-        job_id = self._job_start("run-postclose", started)
-        try:
-            run = self.database.latest_signal_run(at.date(), SignalKind.PRECLOSE_ENTRY.value)
-            run_time = (
-                run["as_of"]
-                if run
-                else datetime.combine(at.date(), self.settings.schedule.preclose_run_at, tzinfo=SHANGHAI_TZ)
-            )
-            news_start = datetime.combine((at - timedelta(days=10)).date(), time(0, 0), tzinfo=SHANGHAI_TZ)
-            news = self._sync_news(news_start, at)
-            self._job_heartbeat(job_id)
-            self.evaluate_morning(at)
-            self.evaluate_previous_preclose(at)
-            self._job_heartbeat(job_id)
-            candidates = self.database.get_candidates(str(run["run_id"])) if run else pd.DataFrame()
-            events = self.database.get_risk_events(run_time, at)
-            context = {
-                "report_date": at.date().isoformat(),
-                "signal_as_of": str(run_time),
-                "preclose_label": self.settings.schedule.preclose_run_at.strftime("%H:%M"),
-                "candidates": self.settings.selection.select_frame(candidates).to_dict("records"),
-                "positions": self.database.get_open_positions().to_dict("records"),
-                "cash": self.database.get_cash(),
-                "after_entry_events": events.to_dict("records"),
-                "news_health": news.__dict__,
-                "required_disclaimer": (
-                    "收盘后未知公告无法由"
-                    f"{self.settings.schedule.preclose_run_at:%H:%M}系统提前预测，属于不可消除的隔夜风险。"
-                ),
-            }
-            report = ReportService(
-                self.database, self.optional_llm(), self.settings.report_dir, self.settings.llm_report_model
-            ).generate(at.date(), at, context)
-            self._job_finish(job_id, "run-postclose", started, "success", "report generated")
-            return report
-        except Exception as exc:
-            self._job_finish(job_id, "run-postclose", started, "failed", str(exc))
-            raise
+        return self.use_cases.run_postclose.execute(at)
+
+    def recover_expired_jobs(self, at: datetime | None = None) -> list[str]:
+        return self.use_cases.recover_expired_jobs.execute(at)

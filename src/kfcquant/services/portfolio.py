@@ -5,8 +5,8 @@ from datetime import datetime
 
 import pandas as pd
 
+from kfcquant.application.ports import PortfolioRepository
 from kfcquant.config import Settings
-from kfcquant.db import Database
 from kfcquant.interfaces import LiveQuoteProvider
 from kfcquant.market_data import LIVE_QUOTE_SCHEMA
 from kfcquant.models import (
@@ -97,8 +97,8 @@ class FeeModel:
 
 
 class PortfolioService:
-    def __init__(self, database: Database, settings: Settings, live_provider: LiveQuoteProvider):
-        self.database = database
+    def __init__(self, repository: PortfolioRepository, settings: Settings, live_provider: LiveQuoteProvider):
+        self.repository = repository
         self.settings = settings
         self.live_provider = live_provider
         self.fees = FeeModel(settings)
@@ -106,7 +106,7 @@ class PortfolioService:
     def plan_candidate_orders(self, run: SignalRun, candidates: list[CandidateScore]) -> list[PaperOrder]:
         if not run.tradable:
             return []
-        positions = self.database.get_open_positions()
+        positions = self.repository.get_open_positions()
         held = set(positions["ts_code"].astype(str)) if not positions.empty else set()
         available_slots = max(self.settings.max_positions - len(held), 0)
         if available_slots <= 0:
@@ -138,37 +138,37 @@ class PortfolioService:
     def create_candidate_orders(self, run: SignalRun, candidates: list[CandidateScore]) -> list[PaperOrder]:
         created: list[PaperOrder] = []
         for order in self.plan_candidate_orders(run, candidates):
-            if self.database.save_order(order):
+            if self.repository.save_order(order):
                 created.append(order)
         return created
 
     def capture_buy_fills(self, run_id: str, at: datetime, quotes: pd.DataFrame) -> list[PaperFill]:
-        orders = self.database.proposed_orders(run_id)
+        orders = self.repository.proposed_orders(run_id)
         if orders.empty:
             return []
-        candidates = self.database.get_candidates(run_id, include_blocked=False)[["ts_code", "rank"]]
+        candidates = self.repository.get_candidates(run_id, include_blocked=False)[["ts_code", "rank"]]
         orders = orders.merge(candidates, on="ts_code", how="left").sort_values(["rank", "created_at"])
         current_map = quotes.set_index("ts_code").to_dict("index")
         fills: list[PaperFill] = []
         for order_row in orders.to_dict("records"):
-            open_positions = self.database.get_open_positions()
+            open_positions = self.repository.get_open_positions()
             if len(open_positions) >= self.settings.max_positions:
-                self.database.reject_order(str(order_row["order_id"]), "组合已满")
+                self.repository.reject_order(str(order_row["order_id"]), "组合已满")
                 continue
             code = str(order_row["ts_code"])
             if not open_positions.empty and code in set(open_positions["ts_code"].astype(str)):
-                self.database.reject_order(str(order_row["order_id"]), "已有持仓，V1禁止加仓")
+                self.repository.reject_order(str(order_row["order_id"]), "已有持仓，V1禁止加仓")
                 continue
             current = current_map.get(code)
             if current is None:
-                self.database.reject_order(
+                self.repository.reject_order(
                     str(order_row["order_id"]),
                     f"{self.settings.schedule.fill_at.strftime('%H:%M')}无实时行情",
                 )
                 continue
-            signal_quote = self.database.get_quote_near(code, pd.Timestamp(order_row["created_at"]).to_pydatetime())
+            signal_quote = self.repository.get_quote_near(code, pd.Timestamp(order_row["created_at"]).to_pydatetime())
             if signal_quote is None:
-                self.database.reject_order(
+                self.repository.reject_order(
                     str(order_row["order_id"]),
                     f"缺少{self.settings.schedule.preclose_run_at.strftime('%H:%M')}基准快照",
                 )
@@ -176,7 +176,7 @@ class PortfolioService:
             delta_volume = float(current["volume"]) - float(signal_quote["volume"])
             delta_amount = float(current["amount"]) - float(signal_quote["amount"])
             if delta_volume <= 0 or delta_amount <= 0:
-                self.database.reject_order(
+                self.repository.reject_order(
                     str(order_row["order_id"]),
                     f"{self.settings.schedule.preclose_run_at.strftime('%H:%M')}至"
                     f"{self.settings.schedule.fill_at.strftime('%H:%M')}无可验证成交",
@@ -186,23 +186,23 @@ class PortfolioService:
             pre_close = float(current["pre_close"])
             theoretical_up = round(pre_close * 1.10 + 1e-8, 2)
             if float(current["price"]) >= theoretical_up * (1 - self.settings.limit_distance_fraction):
-                self.database.reject_order(str(order_row["order_id"]), "接近涨停，视为无法合理成交")
+                self.repository.reject_order(str(order_row["order_id"]), "接近涨停，视为无法合理成交")
                 continue
-            target_value = min(float(order_row["target_value"]), self.database.get_cash())
+            target_value = min(float(order_row["target_value"]), self.repository.get_cash())
             estimated_price = raw_vwap * (1 + self.settings.slippage_rate)
             shares = math.floor(target_value / estimated_price / self.settings.lot_size) * self.settings.lot_size
             order = PaperOrder.model_validate(order_row)
             if shares < self.settings.lot_size:
-                self.database.reject_order(order.order_id, "资金不足一手")
+                self.repository.reject_order(order.order_id, "资金不足一手")
                 continue
             fill, position = self.fees.buy_fill(raw_vwap, shares, at, order)
-            if -fill.total_cash_change > self.database.get_cash():
+            if -fill.total_cash_change > self.repository.get_cash():
                 shares -= self.settings.lot_size
                 if shares < self.settings.lot_size:
-                    self.database.reject_order(order.order_id, "计入费用后资金不足")
+                    self.repository.reject_order(order.order_id, "计入费用后资金不足")
                     continue
                 fill, position = self.fees.buy_fill(raw_vwap, shares, at, order)
-            self.database.apply_buy_fill(fill, position)
+            self.repository.apply_buy_fill(fill, position)
             fills.append(fill)
         return fills
 
@@ -221,20 +221,20 @@ class PortfolioService:
             reason=reason,
             position_id=position.position_id,
         )
-        self.database.create_sell_order_if_absent(order)
+        self.repository.create_sell_order_if_absent(order)
         # If a repeated monitor already created an order, retrieve the original id.
-        pending = self.database.proposed_orders()
+        pending = self.repository.proposed_orders()
         matched = pending[
             (pending["run_id"] == run_id) & (pending["ts_code"] == position.ts_code) & (pending["side"] == "sell")
         ]
         if not matched.empty:
             order = PaperOrder.model_validate(matched.iloc[0].to_dict())
         fill = self.fees.sell_fill(raw_price, position.shares, at, order)
-        closed = self.database.apply_sell_fill(fill, position.position_id, reason)
-        holding_days = self.database.count_trading_days(position.opened_trade_date, at.date())
+        closed = self.repository.apply_sell_fill(fill, position.position_id, reason)
+        holding_days = self.repository.count_trading_days(position.opened_trade_date, at.date())
         net_return = float(closed.realized_pnl or 0.0) / max(position.cost_basis * position.shares, 1.0)
         hit = reason == "take_profit"
-        self.database.save_outcome(
+        self.repository.save_outcome(
             OpportunityOutcome(
                 strategy_id=position.strategy_id,
                 strategy_version=position.strategy_version,
@@ -253,15 +253,15 @@ class PortfolioService:
         return fill
 
     def monitor_positions(self, at: datetime) -> list[PaperFill]:
-        frame = self.database.get_open_positions()
+        frame = self.repository.get_open_positions()
         if frame.empty:
             return []
         fills: list[PaperFill] = []
-        latest_run = self.database.latest_signal_run(at.date(), SignalKind.PRECLOSE_ENTRY.value)
+        latest_run = self.repository.latest_signal_run(at.date(), SignalKind.PRECLOSE_ENTRY.value)
         score_map: dict[str, dict[str, object]] = {}
         can_reassess = bool(latest_run and latest_run.get("status") in {"success", "degraded"})
         if can_reassess:
-            candidates = self.database.get_candidates(str(latest_run["run_id"]), include_blocked=True)
+            candidates = self.repository.get_candidates(str(latest_run["run_id"]), include_blocked=True)
             score_map = candidates.set_index("ts_code").to_dict("index") if not candidates.empty else {}
 
         for row in frame.to_dict("records"):
@@ -291,7 +291,7 @@ class PortfolioService:
                 fills.append(self._close_position(position, *triggered))
                 continue
 
-            holding_days = self.database.count_trading_days(position.opened_trade_date, at.date())
+            holding_days = self.repository.count_trading_days(position.opened_trade_date, at.date())
             if at.time() >= self.settings.schedule.preclose_run_at:
                 candidate = score_map.get(position.ts_code)
                 reason: str | None = None

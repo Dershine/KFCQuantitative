@@ -2,22 +2,22 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from kfcquant.application.ports import CandidateEvaluationRepository
 from kfcquant.config import Settings
-from kfcquant.db import Database
 from kfcquant.interfaces import LiveQuoteProvider
 from kfcquant.models import CandidateOutcome, EvaluationStatus, SignalKind
 
 
 class CandidateEvaluationService:
-    def __init__(self, database: Database, settings: Settings, live_provider: LiveQuoteProvider):
-        self.database = database
+    def __init__(self, repository: CandidateEvaluationRepository, settings: Settings, live_provider: LiveQuoteProvider):
+        self.repository = repository
         self.settings = settings
         self.live_provider = live_provider
 
     def evaluate(self, run: dict[str, object], evaluation_date: datetime) -> list[CandidateOutcome]:
         kind = SignalKind(str(run["signal_kind"]))
         candidates = self.settings.selection.select_frame(
-            self.database.get_candidates(str(run["run_id"]), include_blocked=True)
+            self.repository.get_candidates(str(run["run_id"]), include_blocked=True)
         )
         outcomes: list[CandidateOutcome] = []
         signal_at = run["as_of"]
@@ -69,7 +69,7 @@ class CandidateEvaluationService:
                 evaluation_bars,
                 evaluation_date,
             )
-            self.database.save_candidate_outcome(outcome)
+            self.repository.save_candidate_outcome(outcome)
             outcomes.append(outcome)
         return outcomes
 
