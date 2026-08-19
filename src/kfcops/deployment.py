@@ -396,30 +396,40 @@ class DeploymentManager:
             lock_file = staging / "requirements.lock"
             if not lock_file.exists():
                 raise RuntimeError("目标版本缺少 requirements.lock")
+            # A virtualenv is not relocatable on POSIX: console-script shebangs
+            # contain the absolute environment path.  Move the detached source
+            # worktree to its immutable Release path before creating the venv.
+            # The Release is still unpublished until the atomic `current` link
+            # switch, and every failure below removes this incomplete directory.
+            self._run_git("worktree", "move", str(staging), str(release))
+            moved = True
+            lock_file = release / "requirements.lock"
             self._run_command(
-                [str(self.settings.builder_python), "-m", "venv", str(staging / ".venv")],
-                cwd=staging,
+                [str(self.settings.builder_python), "-m", "venv", str(release / ".venv")],
+                cwd=release,
                 timeout=900,
             )
-            python = self._python_executable(staging)
+            python = self._python_executable(release)
             self._run_command(
                 [str(python), "-m", "pip", "install", "--requirement", str(lock_file)],
-                cwd=staging,
+                cwd=release,
                 timeout=1800,
             )
             self._run_command(
-                [str(python), "-m", "pip", "install", "--no-build-isolation", "--no-deps", str(staging)],
-                cwd=staging,
+                [str(python), "-m", "pip", "install", "--no-build-isolation", "--no-deps", str(release)],
+                cwd=release,
                 timeout=900,
             )
-            self._run_command([str(python), "-m", "pip", "check"], cwd=staging, timeout=300)
+            self._run_command([str(python), "-m", "pip", "check"], cwd=release, timeout=300)
             if not isinstance(workflow, dict):
                 raise RuntimeError("目标版本缺少成功工作流来源证据")
-            self._write_release(staging, sha, workflow=workflow)
-            self._run_git("worktree", "move", str(staging), str(release))
-            moved = True
-            if not self._valid_release(release, sha):
-                raise RuntimeError(f"Release构建后完整性检查失败: {release}")
+            self._write_release(release, sha, workflow=workflow)
+            validation_errors = self._release_validation_errors(release, sha)
+            if validation_errors:
+                raise RuntimeError(
+                    f"Release构建后完整性检查失败: {release}: "
+                    + "; ".join(validation_errors)
+                )
             return release
         except Exception:
             candidate = release if moved else staging
@@ -449,8 +459,12 @@ class DeploymentManager:
         temporary.replace(release_env_file)
 
     def _valid_release(self, release: Path, sha: str) -> bool:
+        return not self._release_validation_errors(release, sha)
+
+    def _release_validation_errors(self, release: Path, sha: str) -> list[str]:
+        errors: list[str] = []
         if release.name != sha or not SHA_PATTERN.fullmatch(sha):
-            return False
+            errors.append("release path or source SHA is invalid")
         env_file = release / ".release.env"
         try:
             values = dict(
@@ -459,31 +473,34 @@ class DeploymentManager:
                 if line and "=" in line
             )
         except OSError:
-            return False
-        base_valid = (
-            values.get("KFCQUANT_SOURCE_SHA") == sha
-            and self._application_executable(release).is_file()
-            and self._release_source_is_clean(release, sha)
-        )
-        if not base_valid:
-            return False
+            errors.append("release environment is unreadable")
+            return errors
+        if values.get("KFCQUANT_SOURCE_SHA") != sha:
+            errors.append("release environment source SHA mismatch")
+        if not self._application_executable(release).is_file():
+            errors.append("release application executable is missing")
+        if not self._release_source_is_clean(release, sha):
+            errors.append("release Git source is dirty or at the wrong commit")
         manifest_name = values.get("KFCQUANT_RELEASE_MANIFEST")
         if manifest_name is None:
-            return True  # Compatibility for the Active Release built before M6-B.
+            return errors  # Compatibility for the Active Release built before M6-B.
+        if manifest_name != ".release-manifest.json":
+            errors.append("release manifest path is invalid")
         try:
             requirements_lock_sha256 = hashlib.sha256(
                 (release / "requirements.lock").read_bytes()
             ).hexdigest()
         except OSError:
-            return False
+            errors.append("requirements lock is unreadable")
+            return errors
         lock_sha256 = values.get("KFCQUANT_DEPENDENCY_LOCK_SHA256")
-        return bool(
-            manifest_name == ".release-manifest.json"
-            and lock_sha256
-            and SHA256_PATTERN.fullmatch(lock_sha256)
-            and lock_sha256 == requirements_lock_sha256
-            and verify_release_manifest(release, sha)
-        )
+        if not lock_sha256 or not SHA256_PATTERN.fullmatch(lock_sha256):
+            errors.append("dependency lock hash is missing or malformed")
+        elif lock_sha256 != requirements_lock_sha256:
+            errors.append("dependency lock hash mismatch")
+        if not verify_release_manifest(release, sha):
+            errors.append("release provenance manifest verification failed")
+        return errors
 
     def _release_source_is_clean(self, release: Path, sha: str) -> bool:
         try:

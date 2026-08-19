@@ -580,8 +580,12 @@ def test_release_build_creates_worktree_venv_and_manifest_before_publish(tmp_pat
         encoding="utf-8",
     )
     assert manager._valid_release(release, sha) is False
+    assert manager._release_validation_errors(release, sha) == ["dependency lock hash mismatch"]
     assert any(command[:2] == ("worktree", "move") for command in commands)
     assert any(command[-3:] == ("-m", "pip", "check") for command in commands)
+    move_index = next(index for index, command in enumerate(commands) if command[:2] == ("worktree", "move"))
+    venv_index = next(index for index, command in enumerate(commands) if "venv" in command)
+    assert move_index < venv_index, "the virtualenv must be created at its immutable final path"
 
 
 def test_incomplete_release_build_is_removed_without_touching_published_release(tmp_path, monkeypatch):
