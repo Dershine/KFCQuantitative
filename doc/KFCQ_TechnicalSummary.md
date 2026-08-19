@@ -10,7 +10,7 @@
 | 首次建立 | 2026-08-15 |
 | 最近复核 | 2026-08-19 |
 | 项目版本基线 | `0.2.0` |
-| 源码基线 | `5be4d10c5647cd47526925606df24fc1fa496668`（M5-B/M5-C实现与本文更新位于当前未提交工作区） |
+| 源码基线 | `383ab17a611a37294c2801b509c3aeebd7ad5ed4`（M5-D实现与本文更新位于当前未提交工作区） |
 | 适用范围 | Research Service、Operations Manager、数据与部署基础设施 |
 | 目标读者 | 项目维护者、策略开发者、代码审查者、部署维护者 |
 | 领域语言 | 以根目录 `CONTEXT.md` 为准 |
@@ -415,8 +415,8 @@ flowchart TD
 | 检查 | 结果 |
 |---|---|
 | Ruff | 通过 |
-| Pytest | 320项通过 |
-| 总覆盖率 | 86%（Research Service，含分支） |
+| Pytest | 327项通过 |
+| 总覆盖率 | 87%（Research Service）、84.09%（Research与Operations合并，均含分支；CI下限84%） |
 | `observability.py` | 91%（含分支） |
 | `bootstrap.py` | 90%（含分支） |
 | `application/queries.py`、`query_models.py` | 100%（含分支） |
@@ -438,7 +438,7 @@ flowchart TD
 | `providers/qwen.py`、`services/news.py` | 79% / 86%（含分支；未覆盖主要为报告/healthcheck和外部下载分支） |
 | `services/portfolio.py` | 78%（含分支） |
 | `services/workflow.py` | 81%（含分支；仅保留Composition Root转交与兼容Facade） |
-| CLI、Scheduler、Runtime、Dashboard | CLI与Dashboard源码模块0%；Scheduler 80%、Runtime 58%（含分支）；Dashboard空库AppTest烟雾通过 |
+| CLI、Scheduler、Runtime、Dashboard | CLI与Dashboard源码模块0%；Scheduler 98%、Runtime 66%（含分支）；Dashboard空库AppTest烟雾通过 |
 
 已有测试重点覆盖：
 
@@ -472,14 +472,15 @@ flowchart TD
 - Composition Root显式注入Database、Provider、Clock、Strategy Registry与UoW，Workflow源码不再导入具体Database、Provider Factory或Repository；Python版本猴补契约、CLI/Scheduler兼容入口和既有测试属性保持可用。
 - Dashboard Query Model在空库、Published Signal、无Quote持仓及组合/交易/评估/健康/风险资讯/报告数据上具有真实DuckDB组件测试；全部方法只读，查询前后数据库文件Hash不变，Query Model语句与分支覆盖率100%，Streamlit七标签空库烟雾无异常。
 - 统一Observability把Job、Run、Strategy、Provider、源码SHA、阶段和information cutoff写为脱敏单行JSON；类型化最小指标覆盖Job、Provider、Quote/EOD、资讯/LLM、候选、拒单、数据库锁和worker心跳。Fake Webhook、本地JSONL、冷却去重、投递失败、锁超时、心跳缺失/过期、资讯异常/积压和stale Quote无买单均有离线证据。
+- CI以84%合并分支覆盖率、核心契约mypy、Bandit高严重度扫描和生产依赖`pip-audit`形成合并门禁；门禁配置本身有契约测试，首次执行发现并修复`setuptools 80.9.0`已知漏洞。
+- M5-D故障套件把Provider超时、文件锁超时、Scheduler重叠/错过策略、`SystemExit`级发布中断、租约回收、迟到写入隔离、heartbeat损坏与恢复串成离线自动化证据；失败时无部分Published Run或订单，恢复后可安全重试。
 
 尚未形成强保护的区域：
 
-- Scheduler任务重叠与错过恢复；
 - Dashboard交互控件、非空全页面渲染和生产规模查询性能；
 - 部署过程中断、依赖半安装和回滚演练；
 - Provider在线原始样本的持续质量监测；
-- 历史重放与实时信号一致性；
+- 长期真实运行样本对实时/Replay一致性的持续监测；
 - 独立于worker进程的生产心跳探针、真实告警接收端演练和JSONL轮转/保留策略。
 
 ---
@@ -530,7 +531,7 @@ flowchart TD
 | TD-014 | MEDIUM | 资讯曾只支持单一`ts_code`归属 | 文档/风险事件已通过显式关系支持多证券、相关度与来源，旧单证券记录兼容 | M3 | `DONE` |
 | TD-015 | MEDIUM | LLM Prompt与响应曾缺少完整版本和追踪元数据 | 风险事件已关联Prompt/Input/Response Hash、模型、耗时和失败元数据 | M3 | `DONE` |
 | TD-016 | LOW | Python要求曾存在3.12/3.13口径差异 | 合法环境可能被doctor误判 | M1 | `DONE` |
-| TD-017 | LOW | 缺少覆盖率门槛、类型检查和依赖安全检查 | 质量退化不能在CI中完全阻断 | M5 | `NOT_STARTED` |
+| TD-017 | LOW | CI曾缺少覆盖率门槛、类型检查和依赖安全检查 | 现由84%合并分支覆盖率、核心契约mypy、Bandit高严重度扫描和生产锁文件漏洞审计阻断退化 | M5 | `DONE` |
 
 技术债状态更新必须附带以下之一：
 
@@ -709,7 +710,7 @@ flowchart LR
 | M2 | 建立可插拔策略内核 | Strategy契约、策略注册、版本化参数和归属贯穿核心模型 | `DONE` |
 | M3 | 建立严格数据与模型血缘 | Run Manifest、数据Schema、快照引用、Prompt追踪可查询 | `DONE` |
 | M4 | 建立实时/历史共核的Replay与实验体系 | 固定快照重放结果一致，可比较基线和候选策略 | `DONE` |
-| M5 | 降低长期维护和运营成本 | 用例与Repository边界明确，结构化观测和质量门禁完善 | `IN_PROGRESS` |
+| M5 | 降低长期维护和运营成本 | 用例与Repository边界明确，结构化观测和质量门禁完善 | `DONE` |
 | M6 | 强化发布并基于证据决定扩展 | 原子Release、恢复演练通过，数据库扩展有量化门槛 | `NOT_STARTED` |
 
 推荐顺序不是简单的代码美化顺序。M1先保护正确性，M2再释放策略演进能力，M3和M4建立研究可信度，M5和M6最后解决规模化维护问题。
@@ -844,12 +845,12 @@ M4进度：`30 / 30 = 100%`。完成条件已满足：基线与候选Strategy可
 | M5-04 | 结构化日志 | 3 | JSON日志与关联ID | Job、Run、Strategy、Provider和阶段可串联查询 | `DONE` |
 | M5-05 | 指标与告警 | 5 | 运行、数据、锁、LLM和组合指标 | 14:40失败、心跳丢失和资讯异常可主动通知 | `DONE` |
 | M5-06 | Dashboard Query Model | 3 | 只读投影或物化查询 | 页面不直接拼接全部领域表语义 | `DONE` |
-| M5-07 | CI质量门禁 | 3 | 覆盖率阈值、类型检查、安全扫描 | 质量退化和已知高危依赖能阻断合并 | `NOT_STARTED` |
-| M5-08 | 故障注入测试 | 5 | 数据源、锁、崩溃和恢复场景 | 关键故障路径具有自动化证据 | `NOT_STARTED` |
+| M5-07 | CI质量门禁 | 3 | 覆盖率阈值、类型检查、安全扫描 | 质量退化和已知高危依赖能阻断合并 | `DONE` |
+| M5-08 | 故障注入测试 | 5 | 数据源、锁、崩溃和恢复场景 | 关键故障路径具有自动化证据 | `DONE` |
 
 M5总点数：`32`。完成条件：核心模块边界可由接口和CI验证，而不只是目录约定。
 
-M5进度：`24 / 32 = 75%`。M5-A、M5-B、M5-C已完成；M5-D尚未开始。
+M5进度：`32 / 32 = 100%`。M5-A至M5-D已完成，里程碑完成条件已满足。
 
 - M5-01证据：原843行、25方法的Workflow已收缩为兼容Facade，诊断、EOD、日历、Morning、Pre-close、两类评价、Fill、持仓监控、Post-close和过期Job恢复分别由11个只有单一公开`execute`入口的应用用例承载；CLI、Scheduler以及测试使用的Workflow属性和方法保持兼容。两时段运行、Manifest、原子发布、时间边界、Provider失败关闭和组合安全回归通过。
 - M5-02证据：新增Market、Research、Job、News、Portfolio、Candidate Evaluation与Report七类Repository Protocol及显式DuckDB适配器；News、Portfolio、Evaluation和Report服务构造器只接收各自最小能力，运行时适配器不暴露其他上下文方法。Research Run UoW仍直接持有DuckDB事务实现，未拆散Run、Manifest、Candidates、Orders与Job的单事务发布边界。
@@ -857,6 +858,10 @@ M5进度：`24 / 32 = 75%`。M5-A、M5-B、M5-C已完成；M5-D尚未开始。
 - M5-06证据：新增类型化`DashboardQueryModel`及DuckDB只读适配器，以Signal、Portfolio、Trading、Evaluation、Data Health和Report投影封装页面查询；Dashboard不再导入Database、使用自由表名或合并持仓/Quote。空库、Published Signal、无Quote持仓、跨上下文投影、风险事件定向查询、查询前后文件Hash和Streamlit七标签烟雾通过；Query Model含分支覆盖率100%。
 - M5-04证据：新增类型化Observability Context和单行JSON Sink，统一字段覆盖`job_run_id`、`signal_run_id`、Strategy ID/版本、源码SHA、Provider、stage和information cutoff；既有应用Logger由同一Handler结构化，Bearer、授权/密钥字段、显式secret和URL敏感查询参数在输出前脱敏。离线Pre-close贯穿证明Provider、候选指标与原子发布事件可由同一Job/Run串联；显式Provider注入身份保持兼容。
 - M5-05证据：最小指标枚举覆盖Job耗时/终态、Provider耗时/失败、Quote年龄、EOD滞后、官方资讯积压、LLM抽取失败、候选数、拒单、数据库锁等待和worker心跳年龄；本地JSONL审计与可选通用Webhook共用脱敏事件，具备进程内冷却去重和失败投递降级。14:40失败、Quote/EOD异常、资讯失败/积压、锁超时及心跳缺失/过期均产生类型化告警；stale Quote贯穿保持`tradable=false`和零订单。
+- M5-07证据：CI读取`pyproject.toml`中的84%合并分支覆盖率阈值，对应用端口、Clock、Provider/Strategy契约和Strategy Identity执行mypy，对`src/`执行Bandit高严重度扫描，并以`pip-audit`审计完整固定版本生产依赖锁；质量门禁契约测试防止CI步骤或阈值被静默移除。首次审计阻断`setuptools 80.9.0`的`PYSEC-2026-3447`，提升到`83.0.0`后无已知漏洞；mypy、Bandit、pip-audit及pip check均通过。
+- M5-08证据：离线Fake与临时DuckDB覆盖Live Provider超时失败关闭及健康重试、数据库锁超时无Job/Run/订单及释放重试、发布写入`orders`后`SystemExit`级worker中断、未提交事务自动回滚、过期租约回收和完整重试；损坏heartbeat失败关闭且下一次原子写恢复。Scheduler显式保持同Job`max_instances=1`、不合并补跑和30秒misfire窗口；既有线程竞争、迟到写入隔离、UoW五阶段回滚、迁移恢复和组合不变量共同纳入54项阶段专项。
+
+M5完成条件已满足：核心应用/Repository/Strategy边界由接口、类型检查和CI契约共同保护；结构化观测、覆盖率、安全/依赖门禁与关键故障恢复均有自动化证据。
 
 ### M6：发布强化与规模决策
 
@@ -884,13 +889,13 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 | M2 策略内核与多策略基础 | 32 | 32 | 100% | `DONE` | 2026-08-18完成M2-E；140项测试、Golden防漂移、Strategy 100%覆盖率及真实数据副本两时段演练通过 |
 | M3 数据契约、血缘与LLM治理 | 30 | 30 | 100% | `DONE` | 2026-08-18完成M3-D；216项测试、风险抽取Trace、多实体门禁、Run→LLM血缘闭环及真实旧库副本v9升级通过 |
 | M4 Replay与策略实验 | 30 | 30 | 100% | `DONE` | 2026-08-18完成M4-D；293项测试、Experiment 100%/Simulator 96%覆盖，同Dataset比较、指标、Schema v10恢复及真实数据副本演练通过 |
-| M5 模块化、可观测性与质量门禁 | 24 | 32 | 75% | `IN_PROGRESS` | 2026-08-19完成M5-C；320项测试、86%总覆盖率、Observability 91%/UoW 100%，119项安全专项与36项迁移/运行专项通过 |
+| M5 模块化、可观测性与质量门禁 | 32 | 32 | 100% | `DONE` | 2026-08-19完成M5-D；327项测试、84.09%合并分支覆盖率、mypy/Bandit/pip-audit、54项故障专项和pip check通过 |
 | M6 发布强化与规模决策 | 0 | 18 | 0% | `NOT_STARTED` | — |
-| **总体** | **142** | **168** | **84.5%** | `IN_PROGRESS` | M0至M4完成，M5为24/32点；下一阶段M5-D |
+| **总体** | **150** | **168** | **89.3%** | `IN_PROGRESS` | M0至M5完成；下一阶段M6-A |
 
 ### 12.1 当前建议的下一工程阶段
 
-工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M1至M4及M5-A、M5-B、M5-C已经完成。当前建议下一阶段为M5-D“CI门禁与故障注入”，按M5-07 → M5-08完成共8点：先让覆盖率、类型、安全和依赖退化可阻断合并，再补齐数据源、锁、调度竞争、崩溃和恢复的自动化故障证据；不跨入M6发布重构。
+工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M1至M5及M5-A至M5-D已经完成。当前建议下一阶段为M6-A“原子发布与迁移预检”，按M6-01 → M6-02完成共8点：先在独立Release目录构建和验证，再对迁移/回滚兼容性预检，确保失败不污染Active Release；不得顺手实施M6-B的备份恢复演练、供应链记录或规模决策。
 
 | 阶段ID | 阶段名称 | 工作包 | 点数 | 依赖 | 状态 | 阶段验收目标 |
 |---|---|---|---:|---|---|---|
@@ -913,7 +918,7 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 | M5-A | 应用与持久化边界 | M5-01、M5-02 | 10 | M4 | `DONE` | Workflow拆为职责单一的应用用例；服务仅依赖最小Repository能力，并保持现有运行语义与事务边界 |
 | M5-B | 依赖组装与查询模型 | M5-03、M5-06 | 6 | M5-A | `DONE` | Composition Root集中组装依赖；Dashboard只消费稳定只读查询模型，不自行拼接领域表语义 |
 | M5-C | 结构化可观测性 | M5-04、M5-05 | 8 | M5-B | `DONE` | Job、Run、Strategy、Provider和阶段可通过关联ID串联；关键运行、数据、锁、LLM和组合异常可度量并告警 |
-| M5-D | CI门禁与故障注入 | M5-07、M5-08 | 8 | M5-C | `NOT_STARTED` | 覆盖率、类型、安全与依赖退化可阻断合并；数据源、锁、崩溃及恢复的关键失败路径具有自动化证据 |
+| M5-D | CI门禁与故障注入 | M5-07、M5-08 | 8 | M5-C | `DONE` | 覆盖率、类型、安全与依赖退化可阻断合并；数据源、锁、崩溃及恢复的关键失败路径具有自动化证据 |
 | M6-A | 原子发布与迁移预检 | M6-01、M6-02 | 8 | M5 | `NOT_STARTED` | Release构建和迁移在切换前完成兼容预检；失败不污染Active Release，不可安全回滚的变更被明确阻止或批准 |
 | M6-B | 恢复、供应链与规模决策 | M6-03、M6-04、M6-05、M6-06 | 10 | M6-A | `NOT_STARTED` | 备份可恢复且通过健康检查；Release来源可追踪；性能与锁基线为继续使用DuckDB或扩展架构提供证据化门槛 |
 
@@ -954,6 +959,8 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 `M5-B`已完成，阶段验收证据为：M5-03把原Workflow中的Database、Repository、Provider、快照、Strategy、服务、UoW和用例构造迁入唯一Composition Root，Facade只负责兼容委派且保留全部显式注入和测试属性；M5-06建立类型化只读Dashboard Query Model，把Signal、持仓/Quote、交易、评估、运行健康、风险事件和报告语义封装为稳定投影，页面不再依赖Database或自由表名。测试先因缺少`bootstrap`和查询契约失败，随后空库、Published Signal、无Quote持仓、跨上下文投影、定向风险查询、文件Hash不变和Streamlit七标签烟雾通过。Ruff、309项全量测试和pip check通过；Research含分支覆盖率86%，Composition Root 92%、Query Model 100%，103项原子发布、时间边界、策略归属和组合安全专项通过。无Schema、迁移、依赖、Provider契约、订单/成交/现金语义、调度、部署、README或领域语言变化；技术债状态不变。当前建议下一阶段为`M5-C`，顺序为M5-04 → M5-05，不提前实施CI门禁或发布强化。
 
 `M5-C`已完成，阶段验收证据为：M5-04以类型化关联上下文、统一Observability Sink和既有Logger桥接输出脱敏单行JSON，Job、Run、Strategy、Provider、源码SHA、stage与information cutoff可串联；M5-05以类型化枚举记录Job、Provider、数据质量、资讯/LLM、候选/拒单、数据库锁和worker心跳指标，并把本地JSONL审计、进程内冷却去重与可选Webhook组合为不参与交易事务的告警通道。测试先因缺少`observability`模块失败，随后11项M5-C专项覆盖JSON解析/脱敏、显式注入兼容、Webhook Fake及失败降级、14:40失败、Quote/EOD、资讯失败/积压、锁超时、心跳缺失/过期、拒单和Pre-close关联贯穿；stale Quote保持`tradable=false`且零订单。Ruff、320项全量测试、pip check通过；Research含分支覆盖率86%，Observability 91%、UoW 100%，119项原子发布/时间边界/策略归属/组合安全专项和36项迁移/运行专项通过。无Schema、迁移、依赖、Provider数据契约、评分、订单/成交/现金语义或真实数据变化；README与环境样例记录可选告警配置，CONTEXT领域语言不变；TD-012完成。生产真实Webhook接收端、独立worker外部探针及JSONL轮转尚未演练，不影响阶段目标；下一阶段为`M5-D`，顺序M5-07 → M5-08，不跨入M6。
+
+`M5-D`已完成，阶段验收证据为：M5-07将Research与Operations合并分支覆盖率下限固定为84%，对六个核心应用/Strategy契约模块执行mypy，对`src/`执行Bandit高严重度扫描，并以`pip-audit`审计固定版本生产依赖；CI/pyproject契约测试防止门禁静默移除。首次审计发现`setuptools 80.9.0`的`PYSEC-2026-3447`并实际阻断，升级到`83.0.0`后无已知漏洞。M5-08新增Provider超时、数据库锁超时、`SystemExit`级发布崩溃、租约回收、健康重试、损坏heartbeat原子恢复以及Scheduler重叠/错过策略证据；所有场景均使用Fake与临时DuckDB，失败无部分Published Run或订单。Ruff、327项全量测试、Research/合并含分支覆盖率87%/84.09%、mypy、Bandit、pip-audit和pip check通过；54项故障/迁移/组合专项通过，Scheduler/UoW含分支覆盖率98%/98%。无Schema、迁移、Provider契约、策略评分、订单/成交/现金语义、生产调度时刻或部署拓扑变化；生产锁文件仅把已知漏洞的setuptools升级到修复版，README补充本地质量命令，CONTEXT领域语言不变；TD-017完成。当前建议下一阶段为`M6-A`，顺序M6-01 → M6-02，不提前实施M6-B。
 
 ### 12.2 阶段级Goal执行规则
 
@@ -1205,6 +1212,7 @@ worker_heartbeat_age_seconds
 | 2026-08-19 | `50deeadf773c`（工作区） | 完成M5-A：独立应用用例、最小Repository端口与DuckDB上下文适配器 | M5-01/02、TD-010完成；M5为10/32点；总体128/168点；下一阶段M5-B | Ruff、302项全量测试、Research含分支覆盖85%、用例82%、Repository 91%、112项两时段/原子发布/时间边界/Provider/归属/组合安全回归和pip check通过 |
 | 2026-08-19 | `5be4d10c5647`（工作区） | 完成M5-B：Composition Root、类型化Dashboard Query Model与只读投影 | M5-03/06完成；M5为16/32点；总体134/168点；下一阶段M5-C；技术债状态不变 | Ruff、309项全量测试、Research含分支覆盖86%、Composition Root 92%、Query Model 100%、Dashboard七标签烟雾、103项安全专项和pip check通过 |
 | 2026-08-19 | `5be4d10c5647`（工作区） | 完成M5-C：脱敏JSON关联日志、类型化指标、本地审计与可选Webhook告警 | M5-04/05、TD-012完成；M5为24/32点；总体142/168点；下一阶段M5-D | Ruff、320项全量测试、Research含分支覆盖86%、Observability 91%、UoW 100%、11项M5-C、119项安全专项、36项迁移/运行专项和pip check通过 |
+| 2026-08-19 | `383ab17a611a`（工作区） | 完成M5-D：84%合并分支覆盖率、核心契约类型检查、代码/依赖安全门禁与关键故障注入 | M5-07/08、TD-017完成；M5为32/32点并完成；总体150/168点；下一阶段M6-A | Ruff、327项全量测试、Research/合并覆盖率87%/84.09%、mypy、Bandit、pip-audit、54项故障/迁移/组合专项和pip check通过；Provider/锁/崩溃/租约/heartbeat/Scheduler恢复验证通过 |
 
 ---
 
@@ -1221,4 +1229,4 @@ KFCQuant当前不是混乱的脚本集合，而是边界意识较强、具备运
 5. M5降低模块耦合并建立主动观测；
 6. M6在真实指标证明需要时强化发布和扩展基础设施。
 
-M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3同样完成，市场与Run输入具备不可变快照和时间边界，风险事件还能继续定位Prompt、模型和输入Hash，多实体资讯不会再被压缩成单一`ts_code`。M4也已完成：Replay Clock、Manifest只读网关、实时/Replay共核、隔离历史Simulator和不可变Experiment/指标记录共同形成可审计实验闭环。M5-A把Workflow行为拆成独立应用用例并用最小Repository端口隔离服务与底层Database，M5-B进一步由Composition Root集中组装全部依赖，并让Dashboard只消费稳定只读投影；M5-C现已让Job、Run、Strategy、Provider和关键阶段具备脱敏关联日志、类型化指标及可选主动告警。下一步由M5-D把覆盖率、类型、安全、依赖和关键故障路径固化为CI门禁，不提前跨入M6。
+M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3同样完成，市场与Run输入具备不可变快照和时间边界，风险事件还能继续定位Prompt、模型和输入Hash，多实体资讯不会再被压缩成单一`ts_code`。M4也已完成：Replay Clock、Manifest只读网关、实时/Replay共核、隔离历史Simulator和不可变Experiment/指标记录共同形成可审计实验闭环。M5同样完成：应用用例、Repository、Composition Root、Dashboard Query Model、结构化可观测性、84%合并分支覆盖率、核心契约类型检查、代码/依赖安全扫描和关键故障恢复证据共同形成可执行工程边界。下一步由M6-A建立独立Release目录、原子切换与迁移/回滚兼容预检，不提前实施M6-B。

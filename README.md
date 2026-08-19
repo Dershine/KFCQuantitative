@@ -214,8 +214,13 @@ Tushare日线模式同时依赖`daily`、`adj_factor`、`stk_limit`、`suspend_d
 
 ```powershell
 .\.venv\Scripts\ruff.exe check src tests
+.\.venv\Scripts\python.exe -m mypy
+.\.venv\Scripts\python.exe -m bandit -r src -c pyproject.toml -lll
+.\.venv\Scripts\python.exe -m pip_audit --strict --desc off --disable-pip --no-deps --requirement requirements.lock
 .\.venv\Scripts\python.exe -m pytest --cov=kfcquant
 ```
+
+CI同时对Research与Operations执行84%分支覆盖率门禁。类型检查覆盖核心应用/Strategy契约边界；Bandit高严重度问题和生产依赖锁中的已知漏洞会阻断合并。`pip-audit`需要访问公开漏洞数据库，不会调用行情、资讯、LLM或券商接口。
 
 免费数据适合学习和前向影子验证，不适合据此宣称策略已经具备稳定收益。至少连续运行60个交易日后，再评估是否购买专业数据。
 

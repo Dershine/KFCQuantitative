@@ -36,6 +36,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "bandit[toml]>=1.8",
+  "mypy>=1.17",
+  "pip-audit>=2.9",
   "pytest>=8.3",
   "pytest-cov>=6.0",
   "ruff>=0.12",
@@ -54,6 +57,33 @@ kfcops = ["templates/*.html"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.coverage.run]
+branch = true
+source = ["kfcquant", "kfcops"]
+
+[tool.coverage.report]
+fail_under = 84
+show_missing = true
+
+[tool.mypy]
+python_version = "3.12"
+files = [
+  "src/kfcquant/application/errors.py",
+  "src/kfcquant/application/ports.py",
+  "src/kfcquant/clock.py",
+  "src/kfcquant/interfaces.py",
+  "src/kfcquant/strategy/contracts.py",
+  "src/kfcquant/strategy_identity.py",
+]
+check_untyped_defs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+no_implicit_optional = true
+warn_unused_ignores = true
+
+[tool.bandit]
+exclude_dirs = ["tests"]
 
 [tool.ruff]
 line-length = 120
