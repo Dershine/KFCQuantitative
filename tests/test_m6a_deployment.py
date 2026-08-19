@@ -443,6 +443,7 @@ def test_linux_runtime_contract_points_only_at_atomic_current_release():
     assert "upsert_ops_setting KFCOPS_CURRENT_RELEASE_LINK" in bootstrap
     assert "--approve-irreversible-migration" in deploy
     assert 'cd "$CURRENT_RELEASE"' in deploy
+    assert "export HOME=/var/lib/kfcops" in deploy
     assert "cd /opt/kfcquant/current" in admin
     assert "cd /opt/kfcquant/current" in service_control
 
@@ -514,6 +515,19 @@ def test_release_integrity_requires_expected_clean_git_head(tmp_path, monkeypatc
 
     monkeypatch.setattr(manager, "_run_command", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("git")))
     assert manager._release_source_is_clean(tmp_path, sha) is False
+
+
+def test_machine_readable_command_output_does_not_treat_stderr_warning_as_data(tmp_path, monkeypatch):
+    manager = DeploymentManager(m6_settings(tmp_path), OpsStore(tmp_path / "ops.sqlite3"))
+
+    class Result:
+        stdout = "expected-stdout\n"
+        stderr = "warning: inaccessible user git config\n"
+        returncode = 0
+
+    monkeypatch.setattr("kfcops.deployment.subprocess.run", lambda *args, **kwargs: Result())
+
+    assert manager._run_command(["git", "status"], stdout_only=True) == "expected-stdout\n"
 
 
 def test_release_build_creates_worktree_venv_and_manifest_before_publish(tmp_path, monkeypatch):

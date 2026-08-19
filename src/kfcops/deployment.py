@@ -505,12 +505,16 @@ class DeploymentManager:
     def _release_source_is_clean(self, release: Path, sha: str) -> bool:
         try:
             head = self._run_command(
-                ["git", "-C", str(release), "rev-parse", "HEAD"], cwd=release, timeout=60
+                ["git", "-C", str(release), "rev-parse", "HEAD"],
+                cwd=release,
+                timeout=60,
+                stdout_only=True,
             ).strip()
             changes = self._run_command(
                 ["git", "-C", str(release), "status", "--porcelain", "--untracked-files=no"],
                 cwd=release,
                 timeout=60,
+                stdout_only=True,
             ).strip()
             return head == sha and not changes
         except Exception:
@@ -767,6 +771,7 @@ class DeploymentManager:
         check: bool = True,
         timeout: int = 900,
         cwd: Path | None = None,
+        stdout_only: bool = False,
     ) -> str:
         result = subprocess.run(
             command,
@@ -779,7 +784,7 @@ class DeploymentManager:
         output = self._redact(f"{result.stdout}\n{result.stderr}")
         if check and result.returncode != 0:
             raise RuntimeError(output[-4000:])
-        return output
+        return self._redact(result.stdout) if stdout_only else output
 
     @staticmethod
     def _redact(value: str) -> str:

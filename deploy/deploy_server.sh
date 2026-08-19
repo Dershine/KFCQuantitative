@@ -45,6 +45,7 @@ if [[ -f "$CURRENT_RELEASE/.release.env" ]]; then
 fi
 set +a
 cd "$CURRENT_RELEASE"
+export HOME=/var/lib/kfcops
 
 if [[ "$APPROVE_IRREVERSIBLE" == true ]]; then
   exec runuser -u kfcops --preserve-environment -- "$CURRENT_RELEASE/.venv/bin/kfcops" deploy \
