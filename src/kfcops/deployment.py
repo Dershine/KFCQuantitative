@@ -21,6 +21,7 @@ from filelock import Timeout as FileLockTimeout
 
 from kfcops.config import OpsSettings
 from kfcops.store import OpsStore
+from kfcops.supply_chain import verify_release_manifest, write_release_manifest
 
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -51,7 +52,12 @@ class DeploymentManager:
             )
             runs.raise_for_status()
         successful = {
-            item["head_sha"]
+            item["head_sha"]: {
+                "id": item.get("id"),
+                "url": item.get("html_url", ""),
+                "name": item.get("name", "test-and-release"),
+                "conclusion": "success",
+            }
             for item in runs.json().get("workflow_runs", [])
             if item.get("name") == "test-and-release" and item.get("conclusion") == "success"
         }
@@ -62,6 +68,7 @@ class DeploymentManager:
                 "message": item["commit"]["message"].splitlines()[0],
                 "date": item["commit"]["committer"]["date"],
                 "deployable": item["sha"] in successful,
+                "workflow": successful.get(item["sha"]),
             }
             for item in commits.json()
         ]
@@ -198,7 +205,7 @@ class DeploymentManager:
             self._run_git("fetch", "--prune", "origin", "main")
             self._run_git("cat-file", "-e", f"{sha}^{{commit}}")
             self._stage(deployment_id, "building", "在独立Release目录构建目标版本")
-            target_release = self._build_release(sha)
+            target_release = self._build_release(sha, workflow=release.get("workflow"))
             self._stage(deployment_id, "prechecking_migrations", "在数据库副本上预检迁移与回滚兼容性")
             compatibility = self._preflight_migrations(
                 previous_release,
@@ -373,7 +380,7 @@ class DeploymentManager:
         recent = self.store.recent_deployments(1)
         return bool(recent and recent[0]["status"] not in TERMINAL_STATES | {"pending"})
 
-    def _build_release(self, sha: str) -> Path:
+    def _build_release(self, sha: str, *, workflow: object = None) -> Path:
         self.settings.releases_directory.mkdir(parents=True, exist_ok=True)
         release = self.settings.releases_directory / sha
         if release.exists():
@@ -405,7 +412,9 @@ class DeploymentManager:
                 timeout=900,
             )
             self._run_command([str(python), "-m", "pip", "check"], cwd=staging, timeout=300)
-            self._write_release(staging, sha)
+            if not isinstance(workflow, dict):
+                raise RuntimeError("目标版本缺少成功工作流来源证据")
+            self._write_release(staging, sha, workflow=workflow)
             self._run_git("worktree", "move", str(staging), str(release))
             moved = True
             if not self._valid_release(release, sha):
@@ -418,12 +427,21 @@ class DeploymentManager:
                 shutil.rmtree(candidate, ignore_errors=True)
             raise
 
-    def _write_release(self, release: Path, sha: str) -> None:
+    def _write_release(self, release: Path, sha: str, *, workflow: dict[str, object]) -> None:
         build_time = self._run_git("show", "-s", "--format=%cI", sha).strip()
+        write_release_manifest(
+            release,
+            sha,
+            source_commit_time=build_time,
+            workflow=workflow,
+            run_command=lambda command: self._run_command(command, cwd=release, timeout=300),
+        )
         release_env_file = release / ".release.env"
         temporary = release / ".release.env.tmp"
         temporary.write_text(
-            f"KFCQUANT_SOURCE_SHA={sha}\nKFCQUANT_BUILD_TIME={build_time}\n",
+            f"KFCQUANT_SOURCE_SHA={sha}\n"
+            f"KFCQUANT_BUILD_TIME={build_time}\n"
+            "KFCQUANT_RELEASE_MANIFEST=.release-manifest.json\n",
             encoding="utf-8",
         )
         temporary.replace(release_env_file)
@@ -440,11 +458,17 @@ class DeploymentManager:
             )
         except OSError:
             return False
-        return (
+        base_valid = (
             values.get("KFCQUANT_SOURCE_SHA") == sha
             and self._application_executable(release).is_file()
             and self._release_source_is_clean(release, sha)
         )
+        if not base_valid:
+            return False
+        manifest_name = values.get("KFCQUANT_RELEASE_MANIFEST")
+        if manifest_name is None:
+            return True  # Compatibility for the Active Release built before M6-B.
+        return manifest_name == ".release-manifest.json" and verify_release_manifest(release, sha)
 
     def _release_source_is_clean(self, release: Path, sha: str) -> bool:
         try:

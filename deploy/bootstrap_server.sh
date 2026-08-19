@@ -44,7 +44,7 @@ id -u kfcops >/dev/null 2>&1 || useradd --system --gid kfcquant --create-home \
 usermod -aG kfcquant kfcops
 
 install -d -o kfcops -g kfcquant -m 2770 /opt/kfcquant "$RELEASES_DIR"
-install -d -o kfcops -g kfcquant -m 2770 /var/lib/kfcops
+install -d -o kfcops -g kfcquant -m 2770 /var/lib/kfcops /var/lib/kfcops/assurance
 install -d -o kfcquant -g kfcquant -m 2770 \
   /var/lib/kfcquant/data /var/lib/kfcquant/data/raw \
   /var/lib/kfcquant/reports /var/lib/kfcquant/runtime /var/lib/kfcquant/backups
@@ -73,7 +73,10 @@ if [[ ! -x "$INITIAL_RELEASE/.venv/bin/kfcquant" ]]; then
     --no-build-isolation --no-deps "$INITIAL_RELEASE"
 fi
 BUILD_TIME="$(runuser -u kfcops -- git -C "$REPOSITORY_DIR" show -s --format=%cI "$SOURCE_SHA")"
-printf 'KFCQUANT_SOURCE_SHA=%s\nKFCQUANT_BUILD_TIME=%s\n' "$SOURCE_SHA" "$BUILD_TIME" > "$INITIAL_RELEASE/.release.env"
+runuser -u kfcops -- "$INITIAL_RELEASE/.venv/bin/kfcops" write-release-manifest \
+  "$INITIAL_RELEASE" "$SOURCE_SHA" "$BUILD_TIME"
+printf 'KFCQUANT_SOURCE_SHA=%s\nKFCQUANT_BUILD_TIME=%s\nKFCQUANT_RELEASE_MANIFEST=.release-manifest.json\n' \
+  "$SOURCE_SHA" "$BUILD_TIME" > "$INITIAL_RELEASE/.release.env"
 chown kfcops:kfcquant "$INITIAL_RELEASE/.release.env"
 chmod 640 "$INITIAL_RELEASE/.release.env"
 ln -sfn "$INITIAL_RELEASE" "$CURRENT_RELEASE"
@@ -102,6 +105,9 @@ KFCOPS_RESEARCH_DATABASE=/var/lib/kfcquant/data/kfcquant.duckdb
 KFCOPS_RESEARCH_LOCK=/var/lib/kfcquant/runtime/database.lock
 KFCOPS_CERTIFICATE_PATH=/etc/letsencrypt/live/$SERVER_NAME/cert.pem
 KFCOPS_BACKUP_DIRECTORY=/var/lib/kfcquant/backups
+KFCOPS_ASSURANCE_DIRECTORY=/var/lib/kfcops/assurance
+KFCOPS_METRICS_PATH=/var/lib/kfcquant/runtime/observability-metrics.jsonl
+KFCOPS_RAW_DATA_DIRECTORY=/var/lib/kfcquant/data/raw
 EOF
   chmod 640 /etc/kfcquant/ops.env
   chown root:kfcquant /etc/kfcquant/ops.env
@@ -135,6 +141,8 @@ visudo -cf /etc/sudoers.d/kfcquant-service-control
 cp "$CURRENT_RELEASE/deploy/systemd/kfcquant-worker.service" /etc/systemd/system/kfcquant-worker.service
 cp "$CURRENT_RELEASE/deploy/systemd/kfcquant-web.service" /etc/systemd/system/kfcquant-web.service
 cp "$CURRENT_RELEASE/deploy/systemd/kfcops.service" /etc/systemd/system/kfcops.service
+cp "$CURRENT_RELEASE/deploy/systemd/kfcquant-assurance.service" /etc/systemd/system/kfcquant-assurance.service
+cp "$CURRENT_RELEASE/deploy/systemd/kfcquant-assurance.timer" /etc/systemd/system/kfcquant-assurance.timer
 cp "$CURRENT_RELEASE/deploy/systemd/certbot-kfcquant.service" /etc/systemd/system/certbot-kfcquant.service
 cp "$CURRENT_RELEASE/deploy/systemd/certbot-kfcquant.timer" /etc/systemd/system/certbot-kfcquant.timer
 systemctl daemon-reload
@@ -174,7 +182,7 @@ fi
 
 sed "s/__SERVER_IP__/$SERVER_NAME/g" "$CURRENT_RELEASE/deploy/nginx/kfcquant.conf.template" \
   > /etc/nginx/sites-available/kfcquant
-systemctl enable --now kfcquant-worker kfcquant-web kfcops certbot-kfcquant.timer
+systemctl enable --now kfcquant-worker kfcquant-web kfcops certbot-kfcquant.timer kfcquant-assurance.timer
 nginx -t
 systemctl reload nginx
 

@@ -25,6 +25,7 @@ jobs:
       - run: ruff check src tests
       - run: python -m mypy
       - run: python -m bandit -r src -c pyproject.toml -lll
+      - run: python scripts/scan_secrets.py --tracked
       - run: python -m pip_audit --strict --desc off --disable-pip --no-deps --requirement requirements.lock
       - run: pytest --cov=kfcquant --cov=kfcops
 

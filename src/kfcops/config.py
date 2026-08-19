@@ -22,12 +22,22 @@ class OpsSettings(BaseSettings):
     research_lock: Path = Path("/var/lib/kfcquant/runtime/database.lock")
     certificate_path: Path | None = None
     backup_directory: Path = Path("/var/lib/kfcquant/backups")
+    assurance_directory: Path = Path("/var/lib/kfcops/assurance")
+    metrics_path: Path = Path("/var/lib/kfcquant/runtime/observability-metrics.jsonl")
+    raw_data_directory: Path = Path("/var/lib/kfcquant/data/raw")
     github_repository: str = "Dershine/KFCQuantitative"
     github_token: str = ""
     session_secret: str = "change-me"
     research_health_url: str = "http://127.0.0.1:8501/research/_stcore/health"
     timezone: str = "Asia/Shanghai"
     backup_retention: int = Field(default=7, ge=1, le=365)
+    capacity_minimum_job_samples: int = Field(default=20, ge=1, le=10_000)
+    capacity_minimum_lock_samples: int = Field(default=100, ge=1, le=100_000)
+    capacity_minimum_query_samples: int = Field(default=20, ge=1, le=1_000)
+    capacity_signal_runtime_budget_seconds: float = Field(default=384.0, gt=0)
+    capacity_lock_wait_p95_limit_seconds: float = Field(default=1.0, ge=0)
+    capacity_query_p95_limit_seconds: float = Field(default=2.0, gt=0)
+    capacity_recovery_rto_seconds: float = Field(default=300.0, gt=0)
     protected_window_start: time = time(8, 15)
     protected_window_end: time = time(15, 10)
 

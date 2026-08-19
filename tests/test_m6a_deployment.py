@@ -137,6 +137,12 @@ def test_github_release_listing_marks_only_successful_main_workflow(tmp_path, mo
         "message": "ready",
         "date": "2026-08-19",
         "deployable": True,
+        "workflow": {
+            "id": None,
+            "url": "",
+            "name": "test-and-release",
+            "conclusion": "success",
+        },
     }
     assert releases[1]["deployable"] is False
 
@@ -249,7 +255,7 @@ def test_build_or_preflight_failure_never_stops_services_or_switches_current(tmp
     monkeypatch.setattr(manager, "releases", lambda: [{"sha": target_sha, "deployable": True}])
     monkeypatch.setattr(manager, "_research_job_running", lambda: False)
     monkeypatch.setattr(manager, "_run_git", lambda *args, **kwargs: "")
-    monkeypatch.setattr(manager, "_build_release", lambda sha: settings.releases_directory / sha)
+    monkeypatch.setattr(manager, "_build_release", lambda sha, **kwargs: settings.releases_directory / sha)
     monkeypatch.setattr(
         manager,
         "_preflight_migrations",
@@ -314,7 +320,7 @@ def test_successful_deployment_switches_only_after_migration_and_rolls_back_link
     monkeypatch.setattr(manager, "releases", lambda: [{"sha": target_sha, "deployable": True}])
     monkeypatch.setattr(manager, "_research_job_running", lambda: False)
     monkeypatch.setattr(manager, "_run_git", lambda *args, **kwargs: "")
-    monkeypatch.setattr(manager, "_build_release", lambda sha: events.append("build") or target)
+    monkeypatch.setattr(manager, "_build_release", lambda sha, **kwargs: events.append("build") or target)
     monkeypatch.setattr(
         manager,
         "_preflight_migrations",
@@ -359,7 +365,7 @@ def test_real_migration_failure_restores_backup_before_old_release_restart(tmp_p
     monkeypatch.setattr(manager, "releases", lambda: [{"sha": target_sha, "deployable": True}])
     monkeypatch.setattr(manager, "_research_job_running", lambda: False)
     monkeypatch.setattr(manager, "_run_git", lambda *args, **kwargs: "")
-    monkeypatch.setattr(manager, "_build_release", lambda sha: target)
+    monkeypatch.setattr(manager, "_build_release", lambda sha, **kwargs: target)
     monkeypatch.setattr(manager, "_preflight_migrations", lambda *args, **kwargs: {"allowed": True})
     monkeypatch.setattr(manager, "_run_service", lambda action, *args, **kwargs: events.append(action) or "ok")
 
@@ -500,19 +506,30 @@ def test_release_build_creates_worktree_venv_and_manifest_before_publish(tmp_pat
         elif "--no-deps" in command:
             executable = cwd / ".venv" / ("Scripts/kfcquant.exe" if os.name == "nt" else "bin/kfcquant")
             executable.write_text("kfcquant", encoding="utf-8")
+        if "migration-contract" in command:
+            return json.dumps(contract(latest=10))
+        if "freeze" in command:
+            return "duckdb==1.3.0\nkfcquant==0.2.0\n"
+        if "--version" in command:
+            return "Python 3.12.11\n"
         return ""
 
     monkeypatch.setattr(manager, "_run_git", fake_git)
     monkeypatch.setattr(manager, "_run_command", fake_command)
     monkeypatch.setattr(manager, "_release_source_is_clean", lambda *args: True)
 
-    release = manager._build_release(sha)
+    release = manager._build_release(
+        sha,
+        workflow={"id": 1234, "url": "https://github.test/actions/runs/1234", "conclusion": "success"},
+    )
 
     assert release == settings.releases_directory / sha
     assert (release / ".release.env").read_text(encoding="utf-8").splitlines() == [
         f"KFCQUANT_SOURCE_SHA={sha}",
         "KFCQUANT_BUILD_TIME=2026-08-19T00:00:00+08:00",
+        "KFCQUANT_RELEASE_MANIFEST=.release-manifest.json",
     ]
+    assert json.loads((release / ".release-manifest.json").read_text(encoding="utf-8"))["source_sha"] == sha
     assert any(command[:2] == ("worktree", "move") for command in commands)
     assert any(command[-3:] == ("-m", "pip", "check") for command in commands)
 

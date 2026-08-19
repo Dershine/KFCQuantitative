@@ -41,6 +41,7 @@ def test_ci_workflow_blocks_coverage_type_security_and_dependency_regressions():
     assert "pytest --cov=kfcquant --cov=kfcops" in workflow
     assert "python -m mypy" in workflow
     assert "python -m bandit -r src -c pyproject.toml -lll" in workflow
+    assert "python scripts/scan_secrets.py --tracked" in workflow
     assert (
         "python -m pip_audit --strict --desc off --disable-pip --no-deps "
         "--requirement requirements.lock"

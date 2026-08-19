@@ -216,6 +216,7 @@ Tushare日线模式同时依赖`daily`、`adj_factor`、`stk_limit`、`suspend_d
 .\.venv\Scripts\ruff.exe check src tests
 .\.venv\Scripts\python.exe -m mypy
 .\.venv\Scripts\python.exe -m bandit -r src -c pyproject.toml -lll
+.\.venv\Scripts\python.exe scripts/scan_secrets.py --tracked
 .\.venv\Scripts\python.exe -m pip_audit --strict --desc off --disable-pip --no-deps --requirement requirements.lock
 .\.venv\Scripts\python.exe -m pytest --cov=kfcquant
 ```
@@ -294,6 +295,8 @@ sudo bash /opt/kfcquant/current/deploy/deploy_server.sh <完整40位commit SHA>
 
 发布管理器依次验证GitHub Actions、检查交易窗口和运行中任务、拉取Git提交，在独立Release目录构建并安装锁定依赖，然后读取Active/Target的机器可读迁移契约，并在正式数据库的临时副本上完成迁移预演。只有构建与预检全部通过后才停止研究服务、备份DuckDB、迁移正式库并原子切换`current`，随后启动并执行健康检查。构建或预检失败不会停止或污染Active Release；迁移、启动或健康检查失败会原子恢复旧链接和部署前数据库备份，默认保留最近7份备份。
 
+每个新Release还会生成`.release-manifest.json`，记录并校验源码SHA、提交/构建时间、Python版本、`requirements.lock` Hash、实际安装包清单、迁移契约及通过的GitHub工作流ID/URL。清单、锁文件或来源证据缺失/篡改会拒绝复用该Release；升级前已经存在的Active Release仍可作为兼容回滚点。
+
 每个迁移必须声明`in_place`、`backup_restore`或`requires_approval`回滚策略及理由。未知策略、Schema降级、契约缺失和未批准的不可逆迁移都会失败关闭。只有已审查迁移确实需要时才可显式批准：
 
 ```bash
@@ -305,6 +308,28 @@ sudo bash /opt/kfcquant/current/deploy/deploy_server.sh <完整40位commit SHA> 
 Research与Operations配置在进程启动前统一校验。Operations的`KFCOPS_SESSION_SECRET`必须是至少32字符的非默认值；矛盾的保护窗口、非法Provider、无效费用/仓位比例或缺少所选Tushare模式的Token都会使启动失败关闭。
 
 手动回滚会消费当前的回滚点；回滚成功后，下一次正常发布会重新建立新的数据库备份和上一版本记录。
+
+### 备份恢复与容量证据
+
+服务器每周日03:30由`kfcquant-assurance.timer`执行一次非破坏性恢复演练：它只读取最新保留备份，把副本恢复到临时目录，校验SHA-256、DuckDB、Schema和核心表后删除临时副本，并把带Hash的成功或失败报告写到`/var/lib/kfcops/assurance/recovery-drills/`。它不会替换正式数据库。可手动触发并查看：
+
+```bash
+sudo systemctl start kfcquant-assurance.service
+sudo systemctl status kfcquant-assurance.service kfcquant-assurance.timer
+sudo journalctl -u kfcquant-assurance.service -n 100
+```
+
+容量报告只读汇总现有Job/锁指标，重复度量最新Signal、开放持仓和最近Job查询，并记录数据库、Parquet和恢复耗时：
+
+```bash
+sudo -u kfcops bash -c 'set -a; source /etc/kfcquant/ops.env; set +a; /opt/kfcquant/current/.venv/bin/kfcops capacity-baseline --json'
+```
+
+报告位于`/var/lib/kfcops/assurance/capacity-baselines/`。扩展判定至少要求20个14:40 Job、100个成功锁等待、每类20个查询和一次成功恢复；证据不足时结果固定为`collect_more_evidence`，不会据此引入PostgreSQL或任务队列。对某份报告复算：
+
+```bash
+sudo -u kfcops bash -c 'set -a; source /etc/kfcquant/ops.env; set +a; /opt/kfcquant/current/.venv/bin/kfcops capacity-decision /var/lib/kfcops/assurance/capacity-baselines/<报告>.json --json'
+```
 
 交易日08:15–15:10从网页提交的部署只登记为待处理；命令行部署会直接拒绝。服务器不会执行任意分支名、标签或Shell片段。
 

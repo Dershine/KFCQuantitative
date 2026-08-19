@@ -10,7 +10,7 @@
 | 首次建立 | 2026-08-15 |
 | 最近复核 | 2026-08-19 |
 | 项目版本基线 | `0.2.0` |
-| 源码基线 | `86f352c`（M6-A实现与本文更新位于当前未提交工作区） |
+| 源码基线 | `611e2f4`（M6-B实现与本文更新位于当前未提交工作区） |
 | 适用范围 | Research Service、Operations Manager、数据与部署基础设施 |
 | 目标读者 | 项目维护者、策略开发者、代码审查者、部署维护者 |
 | 领域语言 | 以根目录 `CONTEXT.md` 为准 |
@@ -232,6 +232,8 @@ KFCQuantitative/
 │   └── dashboard.py              Streamlit只读研究网页
 ├── src/kfcops/                   Operations Manager
 │   ├── deployment.py             发布、回滚和健康检查
+│   ├── assurance.py              隔离恢复演练、性能/锁基线与扩展决策
+│   ├── supply_chain.py            Release来源清单与secret扫描
 │   ├── store.py                  运维SQLite状态与审计
 │   └── web.py                    FastAPI运维页面
 ├── tests/                        单元与组件测试
@@ -406,6 +408,8 @@ flowchart TD
 
 发布控制仓库位于`/opt/kfcquant/repository`；每个SHA以Git worktree进入`/opt/kfcquant/releases/<sha>`并拥有独立`.venv`，systemd、管理员命令和Operations统一通过原子`/opt/kfcquant/current`链接运行。发布流程先验证目标SHA的GitHub Actions状态和交易窗口，在Active Release仍运行时完成目标Release构建、迁移契约比较和临时数据库副本迁移；之后才停服、备份正式DuckDB、用目标Release迁移并原子切换。构建或预检失败不触碰Active Release，正式迁移或健康检查失败会恢复旧链接、部署前数据库和旧服务。
 
+每个M6-B之后构建的Release还包含`.release-manifest.json`，把源码、锁文件、实际安装包、Python、迁移契约及成功工作流证据绑定为可校验Hash；旧Active Release保持兼容，但新构建缺少或篡改清单会失败关闭。`kfcquant-assurance.timer`每周以`kfcops`用户把最新保留备份恢复到隔离临时目录，验证后只保留带Hash报告，不替换正式数据库。
+
 每个Migration的机器可读契约包含连续版本、SQL语句SHA-256、回滚策略和理由。已应用迁移漂移、Schema降级、未知策略、契约缺失和未批准的`requires_approval`迁移均失败关闭；普通Schema升级明确选择原地兼容或恢复部署前备份。预检副本持有研究数据库锁完成复制，迁移后核对目标Schema版本并自动清理。
 
 ---
@@ -417,10 +421,12 @@ flowchart TD
 | 检查 | 结果 |
 |---|---|
 | Ruff | 通过 |
-| Pytest | 348项通过；1项Linux目录符号链接测试在Windows不适用而跳过 |
-| 总覆盖率 | 84.33%（Research与Operations合并且含分支；CI下限84%） |
+| Pytest | 361项通过；1项Linux目录符号链接测试在Windows不适用而跳过 |
+| 总覆盖率 | 85.00%（Research与Operations合并且含分支；CI下限84%） |
 | `observability.py` | 91%（含分支） |
-| `kfcops/deployment.py` | 64%（含分支；M6-A关键构建、预检、切换和恢复分支均有自动化证据） |
+| `assurance.py`、`kfcops/cli.py` | 94% / 97%（含分支） |
+| `supply_chain.py` | 82%（含分支；关键secret、来源Hash及篡改分支已覆盖） |
+| `kfcops/deployment.py` | 65%（含分支；M6-A/M6-B关键构建、来源、预检、切换和恢复分支均有自动化证据） |
 | `migrations.py` | 93%（含分支） |
 | `bootstrap.py` | 90%（含分支） |
 | `application/queries.py`、`query_models.py` | 100%（含分支） |
@@ -442,7 +448,7 @@ flowchart TD
 | `providers/qwen.py`、`services/news.py` | 79% / 86%（含分支；未覆盖主要为报告/healthcheck和外部下载分支） |
 | `services/portfolio.py` | 78%（含分支） |
 | `services/workflow.py` | 81%（含分支；仅保留Composition Root转交与兼容Facade） |
-| CLI、Scheduler、Runtime、Dashboard | CLI与Dashboard源码模块0%；Scheduler 98%、Runtime 66%（含分支）；Dashboard空库AppTest烟雾通过 |
+| CLI、Scheduler、Runtime、Dashboard | Research CLI与Dashboard源码模块0%；Operations CLI 97%、Scheduler 98%、Runtime 66%（含分支）；Dashboard空库AppTest烟雾通过 |
 
 已有测试重点覆盖：
 
@@ -479,11 +485,12 @@ flowchart TD
 - CI以84%合并分支覆盖率、核心契约mypy、Bandit高严重度扫描和生产依赖`pip-audit`形成合并门禁；门禁配置本身有契约测试，首次执行发现并修复`setuptools 80.9.0`已知漏洞。
 - M5-D故障套件把Provider超时、文件锁超时、Scheduler重叠/错过策略、`SystemExit`级发布中断、租约回收、迟到写入隔离、heartbeat损坏与恢复串成离线自动化证据；失败时无部分Published Run或订单，恢复后可安全重试。
 - M6-A离线部署套件覆盖独立worktree/venv构建、完整Release幂等复用、残缺构建清理、Active Release不受构建/预检失败影响、迁移契约与SQL指纹漂移、降级阻断、不可逆迁移显式审批、临时DuckDB副本实迁移、正式迁移崩溃、健康失败、旧链接/备份/WAL恢复和初始无库恢复；Linux运行入口另有路径契约测试，真实目录符号链接原子替换测试在Linux CI执行。
+- M6-B保障套件覆盖备份Hash、隔离恢复、DuckDB/Schema/核心表健康、坏备份/越界/缺失、临时清理和审计报告完整性；Release来源清单绑定锁文件、安装包、迁移契约与工作流并拒绝篡改；容量报告覆盖坏指标、缺库、锁竞争、查询/存储/恢复基线和全部扩展判定分支。真实旧数据只在临时副本升级到Schema v10后完成恢复、查询和容量决策，源库Hash保持不变。
 
 尚未形成强保护的区域：
 
 - Dashboard交互控件、非空全页面渲染和生产规模查询性能；
-- 真实Ubuntu/systemd环境的端到端部署、服务重启和定期备份恢复演练；
+- 真实Ubuntu/systemd环境的端到端部署、服务重启和已安装定时器触发演练；
 - Provider在线原始样本的持续质量监测；
 - 长期真实运行样本对实时/Replay一致性的持续监测；
 - 独立于worker进程的生产心跳探针、真实告警接收端演练和JSONL轮转/保留策略。
@@ -530,7 +537,7 @@ flowchart TD
 | TD-008 | HIGH | Provider以无Schema的DataFrame作为跨层契约 | 外部字段、类型或单位漂移可能静默污染结果 | M3 | `DONE` |
 | TD-009 | HIGH | 实时与Replay曾缺少共享执行Runner | 两条路径现统一经过StrategyExecutionRunner并核对Identity与结果Hash | M4 | `DONE` |
 | TD-010 | MEDIUM | `Workflow`和`Database`职责过多 | Workflow仅保留兼容委派，Composition Root集中组装；应用用例/服务通过Repository、Dashboard通过Query Model隔离底层Database | M5 | `DONE` |
-| TD-011 | MEDIUM | 读写共用全局文件锁 | Dashboard和多策略并行扩展受限 | M5/M6 | `NOT_STARTED` |
+| TD-011 | MEDIUM | 读写共用全局文件锁 | Dashboard和多策略并行扩展受限；M6-B已建立量化门槛，当前真实运行样本不足且查询副本基线未显示瓶颈 | M5/M6 | `DEFERRED`（达到第17节样本与阈值后复核） |
 | TD-012 | MEDIUM | 日志、指标和告警曾未形成统一体系 | 已建立关联上下文、脱敏JSON、类型化指标、本地审计、去重告警和可选Webhook；生产独立探针与接收端演练作为运维配置保留 | M5 | `DONE` |
 | TD-013 | MEDIUM | 部署曾原地修改工作区和活跃虚拟环境 | 已改为独立Release/venv、切换前预检和原子`current`链接，失败不污染Active Release | M6 | `DONE` |
 | TD-014 | MEDIUM | 资讯曾只支持单一`ts_code`归属 | 文档/风险事件已通过显式关系支持多证券、相关度与来源，旧单证券记录兼容 | M3 | `DONE` |
@@ -716,7 +723,7 @@ flowchart LR
 | M3 | 建立严格数据与模型血缘 | Run Manifest、数据Schema、快照引用、Prompt追踪可查询 | `DONE` |
 | M4 | 建立实时/历史共核的Replay与实验体系 | 固定快照重放结果一致，可比较基线和候选策略 | `DONE` |
 | M5 | 降低长期维护和运营成本 | 用例与Repository边界明确，结构化观测和质量门禁完善 | `DONE` |
-| M6 | 强化发布并基于证据决定扩展 | 原子Release、恢复演练通过，数据库扩展有量化门槛 | `IN_PROGRESS` |
+| M6 | 强化发布并基于证据决定扩展 | 原子Release、恢复演练通过，数据库扩展有量化门槛 | `DONE` |
 
 推荐顺序不是简单的代码美化顺序。M1先保护正确性，M2再释放策略演进能力，M3和M4建立研究可信度，M5和M6最后解决规模化维护问题。
 
@@ -874,12 +881,19 @@ M5完成条件已满足：核心应用/Repository/Strategy边界由接口、类�
 |---|---|---:|---|---|---|
 | M6-01 | 版本目录与原子切换 | 5 | `releases/<sha>`、独立venv、`current`链接 | 构建失败不污染Active Release | `DONE` |
 | M6-02 | 迁移预检与兼容矩阵 | 3 | 发布前检查和回滚兼容说明 | 不可安全回滚的迁移必须被显式阻止或批准 | `DONE` |
-| M6-03 | 备份恢复演练 | 3 | 定期恢复测试记录 | 备份不仅存在，而且可恢复并通过健康检查 | `NOT_STARTED` |
-| M6-04 | 供应链治理 | 3 | 依赖审计、secret扫描、构建来源记录 | Release可追踪依赖与构建证据 | `NOT_STARTED` |
-| M6-05 | 性能与锁基线 | 3 | Run耗时、锁等待、查询耗时基线 | 有数据支持是否继续使用DuckDB | `NOT_STARTED` |
-| M6-06 | 扩展决策门槛 | 1 | PostgreSQL/队列引入标准 | 不基于主观感受引入分布式组件 | `NOT_STARTED` |
+| M6-03 | 备份恢复演练 | 3 | 定期恢复测试记录 | 备份不仅存在，而且可恢复并通过健康检查 | `DONE` |
+| M6-04 | 供应链治理 | 3 | 依赖审计、secret扫描、构建来源记录 | Release可追踪依赖与构建证据 | `DONE` |
+| M6-05 | 性能与锁基线 | 3 | Run耗时、锁等待、查询耗时基线 | 有数据支持是否继续使用DuckDB | `DONE` |
+| M6-06 | 扩展决策门槛 | 1 | PostgreSQL/队列引入标准 | 不基于主观感受引入分布式组件 | `DONE` |
 
 M6总点数：`18`。完成条件：发布环境可原子切换，并对是否扩展存储和并发架构形成证据化决策。
+
+M6进度：`18 / 18 = 100%`。完成条件已满足：M6-A提供原子Release与迁移预检，M6-B提供隔离恢复演练、Release来源清单、secret门禁、性能/锁基线和失败关闭的量化扩展决策。
+
+- M6-03证据：`AssuranceManager`持有部署锁且只从配置的备份目录选择DuckDB备份，先核对SHA-256，再复制到临时目录并以只读方式验证Schema、核心表和行数；成功、部署竞争、损坏、越界、缺失与篡改报告均留下带Hash审计，源库和备份不被修改，临时恢复副本始终清理。Linux `kfcquant-assurance.timer`每周触发非破坏性演练，失败以非零状态结束。
+- M6-04证据：新Release的`.release-manifest.json`绑定源码SHA、提交/构建时间、Python、`requirements.lock` Hash、实际安装包清单/Hash、迁移契约/Hash和成功GitHub工作流ID/URL；Hash或锁文件漂移使Release无效，M6-B之前的Active Release保持兼容。CI执行高置信tracked-file secret扫描且不输出命中正文；Ruff、Bandit高严重度、联网`pip-audit`和实际仓库扫描均通过。
+- M6-05证据：容量基线以既有JSONL指标计算Job与数据库锁P50/P95/P99，按Job名称保留14:40样本；在研究锁内以只读连接重复度量最新Signal、开放持仓和最近Job查询，同时记录数据库/Parquet体积、恢复耗时、坏指标行与报告Hash。缺库、锁竞争和篡改恢复证据产生`partial`报告，不伪造完整基线。
+- M6-06证据：类型化门槛要求至少20个14:40 Job、100个成功锁等待、每类20个查询和一次成功恢复；Signal P95预算384秒、锁P95 1秒、查询P95 2秒、恢复RTO 300秒。证据不足时固定返回`collect_more_evidence`；只有多写入者/远程事务、恢复RTO超限或Signal与锁同时超限才建议正式评估存储并发，单独慢Job/查询先建议应用或查询优化，判定从不自动改架构。
 
 ---
 
@@ -895,12 +909,12 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 | M3 数据契约、血缘与LLM治理 | 30 | 30 | 100% | `DONE` | 2026-08-18完成M3-D；216项测试、风险抽取Trace、多实体门禁、Run→LLM血缘闭环及真实旧库副本v9升级通过 |
 | M4 Replay与策略实验 | 30 | 30 | 100% | `DONE` | 2026-08-18完成M4-D；293项测试、Experiment 100%/Simulator 96%覆盖，同Dataset比较、指标、Schema v10恢复及真实数据副本演练通过 |
 | M5 模块化、可观测性与质量门禁 | 32 | 32 | 100% | `DONE` | 2026-08-19完成M5-D；327项测试、84.09%合并分支覆盖率、mypy/Bandit/pip-audit、54项故障专项和pip check通过 |
-| M6 发布强化与规模决策 | 8 | 18 | 44.4% | `IN_PROGRESS` | 2026-08-19完成M6-A；独立Release/venv、原子切换、迁移副本预检和故障回滚通过 |
-| **总体** | **158** | **168** | **94.0%** | `IN_PROGRESS` | M0至M5、M6-A完成；下一阶段M6-B |
+| M6 发布强化与规模决策 | 18 | 18 | 100% | `DONE` | 2026-08-19完成M6-B；隔离恢复、Release来源、secret门禁、性能/锁基线和扩展决策通过 |
+| **总体** | **168** | **168** | **100%** | `DONE` | M0至M6全部完成；下一步为生产证据积累，不立即扩展架构 |
 
 ### 12.1 当前建议的下一工程阶段
 
-工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M1至M5、M5-A至M5-D及M6-A已经完成。当前建议下一阶段为M6-B“恢复、供应链与规模决策”，按M6-03 → M6-04 → M6-05 → M6-06完成共10点：验证真实备份恢复与健康、补齐Release构建来源，再以Run/锁/查询/备份指标形成DuckDB和并发扩展门槛；不得提前引入PostgreSQL、任务队列或分布式基础设施。
+工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M0至M6以及M1-A至M6-B已经全部完成。下一建议阶段是`OPS-A 生产保障证据积累`：在获得Ubuntu服务器或等价隔离环境授权后，验证systemd定时器真实触发、服务级备份恢复与健康，并累计至少20个14:40 Job、100个锁等待和每类20个查询样本后复算容量决策。该建议不进入当前168点架构路线，也不授权部署、真实数据修改或引入PostgreSQL/队列；在运行环境与授权满足前保持Definition of Ready未满足。
 
 | 阶段ID | 阶段名称 | 工作包 | 点数 | 依赖 | 状态 | 阶段验收目标 |
 |---|---|---|---:|---|---|---|
@@ -925,7 +939,7 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 | M5-C | 结构化可观测性 | M5-04、M5-05 | 8 | M5-B | `DONE` | Job、Run、Strategy、Provider和阶段可通过关联ID串联；关键运行、数据、锁、LLM和组合异常可度量并告警 |
 | M5-D | CI门禁与故障注入 | M5-07、M5-08 | 8 | M5-C | `DONE` | 覆盖率、类型、安全与依赖退化可阻断合并；数据源、锁、崩溃及恢复的关键失败路径具有自动化证据 |
 | M6-A | 原子发布与迁移预检 | M6-01、M6-02 | 8 | M5 | `DONE` | Release构建和迁移在切换前完成兼容预检；失败不污染Active Release，不可安全回滚的变更被明确阻止或批准 |
-| M6-B | 恢复、供应链与规模决策 | M6-03、M6-04、M6-05、M6-06 | 10 | M6-A | `NOT_STARTED` | 备份可恢复且通过健康检查；Release来源可追踪；性能与锁基线为继续使用DuckDB或扩展架构提供证据化门槛 |
+| M6-B | 恢复、供应链与规模决策 | M6-03、M6-04、M6-05、M6-06 | 10 | M6-A | `DONE` | 备份可恢复且通过健康检查；Release来源可追踪；性能与锁基线为继续使用DuckDB或扩展架构提供证据化门槛 |
 
 `M1-A`已完成，阶段验收证据为：非默认Schedule/Selection从注册计划贯穿Pre-close运行与订单选择；空库、旧库、重复迁移、失败回滚与恢复通过；Ruff、60项全量测试、66%总覆盖率、pip check和PowerShell语法检查通过。
 
@@ -968,6 +982,8 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 `M5-D`已完成，阶段验收证据为：M5-07将Research与Operations合并分支覆盖率下限固定为84%，对六个核心应用/Strategy契约模块执行mypy，对`src/`执行Bandit高严重度扫描，并以`pip-audit`审计固定版本生产依赖；CI/pyproject契约测试防止门禁静默移除。首次审计发现`setuptools 80.9.0`的`PYSEC-2026-3447`并实际阻断，升级到`83.0.0`后无已知漏洞。M5-08新增Provider超时、数据库锁超时、`SystemExit`级发布崩溃、租约回收、健康重试、损坏heartbeat原子恢复以及Scheduler重叠/错过策略证据；所有场景均使用Fake与临时DuckDB，失败无部分Published Run或订单。Ruff、327项全量测试、Research/合并含分支覆盖率87%/84.09%、mypy、Bandit、pip-audit和pip check通过；54项故障/迁移/组合专项通过，Scheduler/UoW含分支覆盖率98%/98%。无Schema、迁移、Provider契约、策略评分、订单/成交/现金语义、生产调度时刻或部署拓扑变化；生产锁文件仅把已知漏洞的setuptools升级到修复版，README补充本地质量命令，CONTEXT领域语言不变；TD-017完成。当前建议下一阶段为`M6-A`，顺序M6-01 → M6-02，不提前实施M6-B。
 
 `M6-A`已完成，阶段验收证据为：M6-01把Git控制仓库、`releases/<sha>` worktree、每版本独立`.venv`和原子`current`链接分离；目标构建、锁定依赖安装、`pip check`和Release Manifest/源码完整性校验全部在停服前完成，残缺目录拒绝覆盖且可清理，systemd/管理员/服务控制入口只消费Active Release。M6-02为每个Migration登记连续版本、SQL SHA-256、回滚策略和理由；发布前比较Active/Target/正式库版本，在加锁临时副本上实际运行目标迁移并核对最终Schema。已应用迁移漂移、降级、未知策略和未批准不可逆迁移均失败关闭；正式迁移或健康失败恢复旧链接、部署前数据库与旧服务，失败WAL和初始无库状态同样可恢复。Ruff、348项全量测试和pip check通过；Research/Operations合并含分支覆盖率84.33%，`deployment.py` 64%、`migrations.py` 93%；46项M1迁移/租约/原子发布与M6部署专项通过，mypy、Bandit高严重度和联网pip-audit通过。Windows本地环境不支持普通用户创建目录符号链接，因此1项真实原子symlink测试跳过并由Linux CI承接；运行入口路径、单次原子替换调用和全部故障顺序仍有本地自动化证据。无正式Schema版本、依赖、Provider、策略、调度、订单/成交/现金或真实数据变化；README记录新布局、旧布局升级入口和显式审批，CONTEXT领域语言不变；TD-013完成。当前建议下一阶段为`M6-B`，顺序M6-03 → M6-04 → M6-05 → M6-06，不提前引入扩展基础设施。
+
+`M6-B`已完成，阶段验收证据为：M6-03对配置目录内保留备份执行Hash校验、隔离复制、DuckDB只读打开、Schema/核心表健康与原子审计，周度systemd timer不会替换正式库；M6-04把源码、依赖锁、安装包、Python、迁移契约和成功工作流绑定到新Release清单，并以不泄露正文的secret扫描阻断CI；M6-05汇总Run/锁分位数、三类只读查询、存储体积与恢复耗时，坏指标、缺库、锁竞争和篡改报告失败关闭；M6-06以最小样本和P95/RTO阈值区分继续DuckDB、收集证据、局部优化和正式扩展评估。真实旧数据只在临时副本升级到Schema v10，恢复与容量流程通过，源库SHA-256保持`b7a3818c1e2b991bd8ee97a0aa523ca96e824861f8a68d8381133cca81e973fe`且临时副本已删除；当前真实指标不足，判定为`collect_more_evidence`而非主观扩展。Ruff、361项全量测试、85.00%合并分支覆盖率、40项M6/运维专项、`assurance.py` 94%、Ops CLI 97%、mypy、Bandit高严重度、secret扫描、联网`pip-audit`和`pip check`通过；Windows仅跳过既有Linux symlink实测。无Schema、迁移、依赖、Provider、Strategy、订单/成交/现金、真实调度时刻或本地研究数据库变化；README记录新命令和周度演练，CONTEXT领域语言不变；TD-011转`DEFERRED`并绑定第17节复核门槛。M6与168点架构路线全部完成，下一建议为满足授权和真实环境前置后执行`OPS-A`。
 
 ### 12.2 阶段级Goal执行规则
 
@@ -1123,12 +1139,13 @@ worker_heartbeat_age_seconds
 - 生产服务使用独立系统用户、最小写目录和systemd沙箱；
 - 发布目标必须是通过主分支工作流的40位Git SHA；
 - 交易保护窗口内不得直接部署或回滚。
+- CI必须执行tracked-file secret扫描、Bandit和锁定依赖漏洞审计；扫描发现不得输出秘密正文；
+- 新Release必须记录并校验源码、依赖锁、实际安装包、迁移契约和成功工作流来源。
 
 后续补强：
 
 - 生产环境拒绝默认`session_secret`；
-- CI加入secret扫描和依赖漏洞检查；
-- Release记录依赖清单与构建证据；
+- 对Release清单采用CI签名或平台原生attestation（只有明确供应链威胁模型后实施）；
 - 日志脱敏覆盖Bearer Token、URL查询参数和常见授权头；
 - 外部文档下载限制协议、重定向、大小、内容类型和内网地址访问；
 - LLM输入输出保存Hash和元数据时，不复制不必要的敏感内容。
@@ -1146,6 +1163,10 @@ worker_heartbeat_age_seconds
 - 数据库和Parquet增长率；
 - 多策略串行运行总耗时；
 - 备份和恢复耗时。
+
+M6-B把证据门槛固化为可执行Policy：至少20个`run-preclose`耗时样本、100个成功数据库锁样本、三类Dashboard查询各20次，以及一份成功恢复报告；阈值为14:40 Signal P95不超过384秒、锁等待P95不超过1秒、查询P95不超过2秒、恢复不超过300秒。证据不足固定结论为`collect_more_evidence`，单独查询或Job变慢先分别优化查询或批处理；只有Signal与锁同时超限、恢复RTO超限或出现明确多写入者/远程事务需求，才进入存储并发架构评估。
+
+2026-08-19真实数据只读副本演练：旧库仅在临时副本迁移到Schema v10，恢复健康耗时0.188秒；数据库54,276,096字节、Parquet 29,944,122字节，3次样本的最新Signal/开放持仓/最近Job查询P95分别约1.53/0.39/18.18毫秒。源库SHA-256前后均为`b7a3818c1e2b991bd8ee97a0aa523ca96e824861f8a68d8381133cca81e973fe`。由于缺少20个真实14:40 Job、100个锁样本和每类20次查询，当前正式结论为`collect_more_evidence`，不建议引入PostgreSQL或队列。
 
 满足以下任一情况时，才正式评估PostgreSQL或任务队列：
 
@@ -1221,6 +1242,7 @@ worker_heartbeat_age_seconds
 | 2026-08-19 | `5be4d10c5647`（工作区） | 完成M5-C：脱敏JSON关联日志、类型化指标、本地审计与可选Webhook告警 | M5-04/05、TD-012完成；M5为24/32点；总体142/168点；下一阶段M5-D | Ruff、320项全量测试、Research含分支覆盖86%、Observability 91%、UoW 100%、11项M5-C、119项安全专项、36项迁移/运行专项和pip check通过 |
 | 2026-08-19 | `383ab17a611a`（工作区） | 完成M5-D：84%合并分支覆盖率、核心契约类型检查、代码/依赖安全门禁与关键故障注入 | M5-07/08、TD-017完成；M5为32/32点并完成；总体150/168点；下一阶段M6-A | Ruff、327项全量测试、Research/合并覆盖率87%/84.09%、mypy、Bandit、pip-audit、54项故障/迁移/组合专项和pip check通过；Provider/锁/崩溃/租约/heartbeat/Scheduler恢复验证通过 |
 | 2026-08-19 | `86f352c`（工作区） | 完成M6-A：独立Release/venv、原子Active切换、迁移契约与副本预检 | M6-01/02、TD-013完成；M6为8/18点；总体158/168点；下一阶段M6-B | Ruff、348项全量测试、合并84.33%含分支覆盖率、46项部署/迁移/恢复专项、mypy、Bandit、pip-audit和pip check通过；Windows跳过1项Linux symlink实测 |
+| 2026-08-19 | `611e2f4`（工作区） | 完成M6-B：隔离备份恢复、Release来源/secret门禁、性能与锁基线、量化扩展决策 | M6-03/04/05/06完成；M6为18/18点并完成；总体168/168点；TD-011转DEFERRED；下一建议OPS-A | Ruff、361项全量测试、85.00%合并分支覆盖率、40项M6/运维专项、Assurance 94%/Ops CLI 97%、mypy、Bandit、secret扫描、pip-audit、pip check及真实数据只读副本恢复/容量演练通过 |
 
 ---
 
@@ -1237,4 +1259,4 @@ KFCQuant当前不是混乱的脚本集合，而是边界意识较强、具备运
 5. M5降低模块耦合并建立主动观测；
 6. M6在真实指标证明需要时强化发布和扩展基础设施。
 
-M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3同样完成，市场与Run输入具备不可变快照和时间边界，风险事件还能继续定位Prompt、模型和输入Hash，多实体资讯不会再被压缩成单一`ts_code`。M4也已完成：Replay Clock、Manifest只读网关、实时/Replay共核、隔离历史Simulator和不可变Experiment/指标记录共同形成可审计实验闭环。M5同样完成：应用用例、Repository、Composition Root、Dashboard Query Model、结构化可观测性、84%合并分支覆盖率、核心契约类型检查、代码/依赖安全扫描和关键故障恢复证据共同形成可执行工程边界。M6-A也已完成：独立Release/venv、原子Active切换、机器可读迁移契约、数据库副本预演和故障回滚消除了原地部署污染风险。下一步由M6-B完成真实备份恢复、供应链来源记录和性能/锁基线，再依据量化门槛决定是否维持DuckDB或评估扩展。
+M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3同样完成，市场与Run输入具备不可变快照和时间边界，风险事件还能继续定位Prompt、模型和输入Hash，多实体资讯不会再被压缩成单一`ts_code`。M4也已完成：Replay Clock、Manifest只读网关、实时/Replay共核、隔离历史Simulator和不可变Experiment/指标记录共同形成可审计实验闭环。M5同样完成：应用用例、Repository、Composition Root、Dashboard Query Model、结构化可观测性、84%合并分支覆盖率、核心契约类型检查、代码/依赖安全扫描和关键故障恢复证据共同形成可执行工程边界。M6也已完成：独立Release/venv、原子Active切换、机器可读迁移契约、隔离恢复演练、Release来源清单、secret门禁和量化容量决策共同消除了原地部署污染与主观扩展风险。当前证据支持继续保持模块化单体和DuckDB；下一步不是引入PostgreSQL或队列，而是在获得运行环境授权后执行OPS-A，积累生产恢复、Job、锁和查询样本并复算既定门槛。

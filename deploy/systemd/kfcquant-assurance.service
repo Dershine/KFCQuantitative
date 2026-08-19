@@ -1,0 +1,21 @@
+[Unit]
+Description=KFCQuant isolated backup recovery assurance drill
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=kfcops
+Group=kfcquant
+WorkingDirectory=/opt/kfcquant/current
+EnvironmentFile=/etc/kfcquant/ops.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/var/lib/kfcops
+ExecStart=/opt/kfcquant/current/.venv/bin/kfcops recovery-drill
+UMask=0007
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/kfcquant/backups
+ReadWritePaths=/var/lib/kfcops
