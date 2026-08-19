@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -476,7 +477,11 @@ class Database:
         resolved_lock = Path(lock_path) if lock_path else Path(f"{self.path}.lock")
         resolved_lock.parent.mkdir(parents=True, exist_ok=True)
         resolved_lock.touch(exist_ok=True)
-        resolved_lock.chmod(0o666)
+        try:
+            resolved_lock.chmod(0o666)
+        except PermissionError:
+            if not os.access(resolved_lock, os.R_OK | os.W_OK):
+                raise
         self.lock = FileLock(resolved_lock, timeout=lock_timeout_seconds)
         self.observability = observability or get_observability()
 

@@ -530,6 +530,25 @@ def test_machine_readable_command_output_does_not_treat_stderr_warning_as_data(t
     assert manager._run_command(["git", "status"], stdout_only=True) == "expected-stdout\n"
 
 
+def test_deployment_health_check_parses_only_application_stdout(tmp_path, monkeypatch):
+    manager = DeploymentManager(m6_settings(tmp_path), OpsStore(tmp_path / "ops.sqlite3"))
+
+    class Response:
+        status_code = 200
+
+    monkeypatch.setattr("kfcops.deployment.httpx.get", lambda *args, **kwargs: Response())
+
+    def application(*arguments, **kwargs):
+        assert arguments == ("health", "--json")
+        assert kwargs["stdout_only"] is True
+        return '{"status":"ok"}\n'
+
+    monkeypatch.setattr(manager, "_run_application", application)
+    monkeypatch.setattr(manager, "_run_service", lambda *args, **kwargs: "active")
+
+    manager._wait_healthy()
+
+
 def test_release_build_creates_worktree_venv_and_manifest_before_publish(tmp_path, monkeypatch):
     settings = m6_settings(tmp_path)
     settings.repository_directory.mkdir()

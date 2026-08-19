@@ -717,7 +717,12 @@ class DeploymentManager:
             try:
                 response = httpx.get(self.settings.research_health_url, timeout=5)
                 worker_active = self._run_service("is-active", "worker", check=False).strip() == "active"
-                health_output = self._run_application("health", "--json", check=False)
+                health_output = self._run_application(
+                    "health",
+                    "--json",
+                    check=False,
+                    stdout_only=True,
+                )
                 health = json.loads(health_output)
                 if response.status_code == 200 and worker_active and health.get("status") == "ok":
                     return
@@ -745,14 +750,24 @@ class DeploymentManager:
             timeout=900,
         )
 
-    def _run_application(self, *arguments: str, check: bool = True) -> str:
+    def _run_application(
+        self,
+        *arguments: str,
+        check: bool = True,
+        stdout_only: bool = False,
+    ) -> str:
         if os.name == "nt":
             release = self._active_release_path()
             if release is None:
                 raise RuntimeError("Active Release链接无效")
             executable = self._application_executable(release)
-            return self._run_command([str(executable), *arguments], check=check, timeout=900)
-        return self._run_service("app", *arguments, check=check)
+            return self._run_command(
+                [str(executable), *arguments],
+                check=check,
+                timeout=900,
+                stdout_only=stdout_only,
+            )
+        return self._run_service("app", *arguments, check=check, stdout_only=stdout_only)
 
     def _run_release_application(self, release: Path, *arguments: str, check: bool = True) -> str:
         executable = self._application_executable(release)
@@ -760,9 +775,14 @@ class DeploymentManager:
             raise RuntimeError(f"Release应用入口不存在: {executable}")
         return self._run_command([str(executable), *arguments], cwd=release, check=check, timeout=900)
 
-    def _run_service(self, *arguments: str, check: bool = True) -> str:
+    def _run_service(
+        self,
+        *arguments: str,
+        check: bool = True,
+        stdout_only: bool = False,
+    ) -> str:
         command = ["sudo", "-n", str(self.settings.service_control_command), *arguments]
-        return self._run_command(command, check=check, timeout=120)
+        return self._run_command(command, check=check, timeout=120, stdout_only=stdout_only)
 
     def _run_command(
         self,

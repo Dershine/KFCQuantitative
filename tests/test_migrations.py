@@ -483,3 +483,37 @@ def test_migration_runner_rejects_unordered_or_inconsistent_versions(tmp_path):
         connection.execute("INSERT INTO schema_migrations(version) VALUES (2)")
         with pytest.raises(RuntimeError, match="newer"):
             runner.apply([migration_1])
+
+
+def test_database_reuses_group_writable_lock_when_non_owner_cannot_chmod(tmp_path, monkeypatch):
+    database_path = tmp_path / "shared.duckdb"
+    lock_path = tmp_path / "shared.lock"
+    lock_path.touch()
+    original_chmod = type(lock_path).chmod
+
+    def owner_only_chmod(path, mode):
+        if path == lock_path:
+            raise PermissionError("not lock owner")
+        return original_chmod(path, mode)
+
+    monkeypatch.setattr(type(lock_path), "chmod", owner_only_chmod)
+    monkeypatch.setattr("kfcquant.db.os.access", lambda path, mode: path == lock_path)
+
+    database = Database(database_path, lock_path=lock_path)
+
+    assert database.lock.lock_file == str(lock_path)
+
+
+def test_database_rejects_lock_when_non_owner_cannot_write_or_chmod(tmp_path, monkeypatch):
+    database_path = tmp_path / "shared.duckdb"
+    lock_path = tmp_path / "shared.lock"
+    lock_path.touch()
+
+    def reject_chmod(path, mode):
+        raise PermissionError("not lock owner")
+
+    monkeypatch.setattr(type(lock_path), "chmod", reject_chmod)
+    monkeypatch.setattr("kfcquant.db.os.access", lambda path, mode: False)
+
+    with pytest.raises(PermissionError, match="not lock owner"):
+        Database(database_path, lock_path=lock_path)
