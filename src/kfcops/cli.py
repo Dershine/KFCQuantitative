@@ -22,11 +22,18 @@ def serve(host: str = "127.0.0.1", port: int = 8600) -> None:
 
 
 @app.command()
-def deploy(sha: str = typer.Argument(..., help="通过main工作流的40位Git提交SHA")) -> None:
+def deploy(
+    sha: str = typer.Argument(..., help="通过main工作流的40位Git提交SHA"),
+    approve_irreversible_migration: bool = typer.Option(
+        False,
+        "--approve-irreversible-migration",
+        help="显式批准迁移契约中标记为不可逆的变更",
+    ),
+) -> None:
     """Synchronously deploy one tested commit; intended for deploy_server.sh."""
     settings = OpsSettings()
     manager = DeploymentManager(settings, OpsStore(settings.database_path))
-    deployment_id = manager.deploy_now(sha)
+    deployment_id = manager.deploy_now(sha, approve_irreversible=approve_irreversible_migration)
     typer.echo(f"deployment {deployment_id} succeeded")
 
 

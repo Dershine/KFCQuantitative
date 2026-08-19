@@ -7,7 +7,9 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_DIR=/opt/kfcquant/app
+REPOSITORY_DIR=/opt/kfcquant/repository
+RELEASES_DIR=/opt/kfcquant/releases
+CURRENT_RELEASE=/opt/kfcquant/current
 REPOSITORY_URL="$(git -C "$PROJECT_ROOT" remote get-url origin)"
 
 read -r -p "Public IPv4 address or domain: " SERVER_NAME
@@ -41,30 +43,44 @@ id -u kfcops >/dev/null 2>&1 || useradd --system --gid kfcquant --create-home \
   --home-dir /var/lib/kfcops --shell /usr/sbin/nologin kfcops
 usermod -aG kfcquant kfcops
 
-install -d -o kfcops -g kfcquant -m 2770 /opt/kfcquant
+install -d -o kfcops -g kfcquant -m 2770 /opt/kfcquant "$RELEASES_DIR"
 install -d -o kfcops -g kfcquant -m 2770 /var/lib/kfcops
 install -d -o kfcquant -g kfcquant -m 2770 \
   /var/lib/kfcquant/data /var/lib/kfcquant/data/raw \
   /var/lib/kfcquant/reports /var/lib/kfcquant/runtime /var/lib/kfcquant/backups
 install -d /var/www/certbot
 
-if [[ ! -d "$APP_DIR/.git" ]]; then
-  git clone --no-hardlinks "$PROJECT_ROOT" "$APP_DIR"
-  git -C "$APP_DIR" remote set-url origin "$REPOSITORY_URL"
+if [[ ! -d "$REPOSITORY_DIR/.git" ]]; then
+  git clone --no-hardlinks "$PROJECT_ROOT" "$REPOSITORY_DIR"
+  git -C "$REPOSITORY_DIR" remote set-url origin "$REPOSITORY_URL"
 fi
-chown -R kfcops:kfcquant "$APP_DIR"
-chmod -R g+rX "$APP_DIR"
+chown -R kfcops:kfcquant "$REPOSITORY_DIR" "$RELEASES_DIR"
+chmod -R g+rX "$REPOSITORY_DIR"
 
-if [[ ! -x "$APP_DIR/.venv/bin/python" ]]; then
-  runuser -u kfcops -- python3 -m venv "$APP_DIR/.venv"
+SOURCE_SHA="$(runuser -u kfcops -- git -C "$REPOSITORY_DIR" rev-parse HEAD)"
+INITIAL_RELEASE="$RELEASES_DIR/$SOURCE_SHA"
+if [[ ! -x "$INITIAL_RELEASE/.venv/bin/kfcquant" ]]; then
+  if [[ -e "$INITIAL_RELEASE" ]]; then
+    echo "Incomplete initial Release already exists: $INITIAL_RELEASE" >&2
+    exit 1
+  fi
+  runuser -u kfcops -- git -C "$REPOSITORY_DIR" worktree add --detach "$INITIAL_RELEASE" "$SOURCE_SHA"
+  runuser -u kfcops -- python3 -m venv "$INITIAL_RELEASE/.venv"
+  runuser -u kfcops -- "$INITIAL_RELEASE/.venv/bin/python" -m pip install --upgrade pip
+  runuser -u kfcops -- "$INITIAL_RELEASE/.venv/bin/python" -m pip install \
+    --requirement "$INITIAL_RELEASE/requirements.lock"
+  runuser -u kfcops -- "$INITIAL_RELEASE/.venv/bin/python" -m pip install \
+    --no-build-isolation --no-deps "$INITIAL_RELEASE"
 fi
-runuser -u kfcops -- "$APP_DIR/.venv/bin/python" -m pip install --upgrade pip
-runuser -u kfcops -- "$APP_DIR/.venv/bin/python" -m pip install --requirement "$APP_DIR/requirements.lock"
-runuser -u kfcops -- "$APP_DIR/.venv/bin/python" -m pip install --no-build-isolation --no-deps "$APP_DIR"
+BUILD_TIME="$(runuser -u kfcops -- git -C "$REPOSITORY_DIR" show -s --format=%cI "$SOURCE_SHA")"
+printf 'KFCQUANT_SOURCE_SHA=%s\nKFCQUANT_BUILD_TIME=%s\n' "$SOURCE_SHA" "$BUILD_TIME" > "$INITIAL_RELEASE/.release.env"
+chown kfcops:kfcquant "$INITIAL_RELEASE/.release.env"
+chmod 640 "$INITIAL_RELEASE/.release.env"
+ln -sfn "$INITIAL_RELEASE" "$CURRENT_RELEASE"
 
 install -d -o root -g kfcquant -m 750 /etc/kfcquant
 if [[ ! -f /etc/kfcquant/research.env ]]; then
-  cp "$APP_DIR/deploy/server.env.example" /etc/kfcquant/research.env
+  cp "$CURRENT_RELEASE/deploy/server.env.example" /etc/kfcquant/research.env
   chmod 640 /etc/kfcquant/research.env
   chown root:kfcquant /etc/kfcquant/research.env
 fi
@@ -77,9 +93,10 @@ KFCOPS_GITHUB_REPOSITORY=Dershine/KFCQuantitative
 KFCOPS_GITHUB_TOKEN=
 KFCOPS_DATABASE_PATH=/var/lib/kfcops/ops.sqlite3
 KFCOPS_DEPLOYMENT_LOCK=/var/lib/kfcops/deploy.lock
-KFCOPS_REPOSITORY_DIRECTORY=$APP_DIR
-KFCOPS_VIRTUALENV_DIRECTORY=$APP_DIR/.venv
-KFCOPS_RELEASE_ENV_FILE=$APP_DIR/.release.env
+KFCOPS_REPOSITORY_DIRECTORY=$REPOSITORY_DIR
+KFCOPS_RELEASES_DIRECTORY=$RELEASES_DIR
+KFCOPS_CURRENT_RELEASE_LINK=$CURRENT_RELEASE
+KFCOPS_BUILDER_PYTHON=/usr/bin/python3
 KFCOPS_SERVICE_CONTROL_COMMAND=/usr/local/sbin/kfcquant-service-control
 KFCOPS_RESEARCH_DATABASE=/var/lib/kfcquant/data/kfcquant.duckdb
 KFCOPS_RESEARCH_LOCK=/var/lib/kfcquant/runtime/database.lock
@@ -90,33 +107,43 @@ EOF
   chown root:kfcquant /etc/kfcquant/ops.env
 fi
 
-SOURCE_SHA="$(runuser -u kfcops -- git -C "$APP_DIR" rev-parse HEAD)"
-BUILD_TIME="$(runuser -u kfcops -- git -C "$APP_DIR" show -s --format=%cI HEAD)"
-printf 'KFCQUANT_SOURCE_SHA=%s\nKFCQUANT_BUILD_TIME=%s\n' "$SOURCE_SHA" "$BUILD_TIME" > "$APP_DIR/.release.env"
-chown kfcops:kfcquant "$APP_DIR/.release.env"
-chmod 640 "$APP_DIR/.release.env"
+upsert_ops_setting() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" /etc/kfcquant/ops.env; then
+    sed -i "s|^${key}=.*|${key}=${value}|" /etc/kfcquant/ops.env
+  else
+    printf '%s=%s\n' "$key" "$value" >> /etc/kfcquant/ops.env
+  fi
+}
+upsert_ops_setting KFCOPS_REPOSITORY_DIRECTORY "$REPOSITORY_DIR"
+upsert_ops_setting KFCOPS_RELEASES_DIRECTORY "$RELEASES_DIR"
+upsert_ops_setting KFCOPS_CURRENT_RELEASE_LINK "$CURRENT_RELEASE"
+upsert_ops_setting KFCOPS_BUILDER_PYTHON /usr/bin/python3
+chmod 640 /etc/kfcquant/ops.env
+chown root:kfcquant /etc/kfcquant/ops.env
 
-install -o root -g root -m 755 "$APP_DIR/deploy/kfcquant-service-control" \
+install -o root -g root -m 755 "$CURRENT_RELEASE/deploy/kfcquant-service-control" \
   /usr/local/sbin/kfcquant-service-control
-install -o root -g root -m 755 "$APP_DIR/deploy/kfcquant-admin" /usr/local/sbin/kfcquant-admin
+install -o root -g root -m 755 "$CURRENT_RELEASE/deploy/kfcquant-admin" /usr/local/sbin/kfcquant-admin
 cat > /etc/sudoers.d/kfcquant-service-control <<'EOF'
 kfcops ALL=(root) NOPASSWD: /usr/local/sbin/kfcquant-service-control *
 EOF
 chmod 440 /etc/sudoers.d/kfcquant-service-control
 visudo -cf /etc/sudoers.d/kfcquant-service-control
 
-cp "$APP_DIR/deploy/systemd/kfcquant-worker.service" /etc/systemd/system/kfcquant-worker.service
-cp "$APP_DIR/deploy/systemd/kfcquant-web.service" /etc/systemd/system/kfcquant-web.service
-cp "$APP_DIR/deploy/systemd/kfcops.service" /etc/systemd/system/kfcops.service
-cp "$APP_DIR/deploy/systemd/certbot-kfcquant.service" /etc/systemd/system/certbot-kfcquant.service
-cp "$APP_DIR/deploy/systemd/certbot-kfcquant.timer" /etc/systemd/system/certbot-kfcquant.timer
+cp "$CURRENT_RELEASE/deploy/systemd/kfcquant-worker.service" /etc/systemd/system/kfcquant-worker.service
+cp "$CURRENT_RELEASE/deploy/systemd/kfcquant-web.service" /etc/systemd/system/kfcquant-web.service
+cp "$CURRENT_RELEASE/deploy/systemd/kfcops.service" /etc/systemd/system/kfcops.service
+cp "$CURRENT_RELEASE/deploy/systemd/certbot-kfcquant.service" /etc/systemd/system/certbot-kfcquant.service
+cp "$CURRENT_RELEASE/deploy/systemd/certbot-kfcquant.timer" /etc/systemd/system/certbot-kfcquant.timer
 systemctl daemon-reload
 
 set -a
 # shellcheck disable=SC1091
 source /etc/kfcquant/research.env
 set +a
-runuser -u kfcquant --preserve-environment -- "$APP_DIR/.venv/bin/kfcquant" migrate
+runuser -u kfcquant --preserve-environment -- "$CURRENT_RELEASE/.venv/bin/kfcquant" migrate
 if [[ -f /var/lib/kfcquant/data/kfcquant.duckdb ]]; then
   chmod 660 /var/lib/kfcquant/data/kfcquant.duckdb
 fi
@@ -145,7 +172,7 @@ else
     --webroot --webroot-path /var/www/certbot -d "$SERVER_NAME"
 fi
 
-sed "s/__SERVER_IP__/$SERVER_NAME/g" "$APP_DIR/deploy/nginx/kfcquant.conf.template" \
+sed "s/__SERVER_IP__/$SERVER_NAME/g" "$CURRENT_RELEASE/deploy/nginx/kfcquant.conf.template" \
   > /etc/nginx/sites-available/kfcquant
 systemctl enable --now kfcquant-worker kfcquant-web kfcops certbot-kfcquant.timer
 nginx -t
@@ -156,4 +183,4 @@ echo "1. Fill LLM_API_KEY in /etc/kfcquant/research.env."
 echo "2. Fill KFCOPS_GITHUB_TOKEN in /etc/kfcquant/ops.env for a private repository."
 echo "3. Restart services: systemctl restart kfcquant-worker kfcquant-web kfcops."
 echo "4. Initialize history with: sudo kfcquant-admin sync-eod --start YYYY-MM-DD --end YYYY-MM-DD."
-echo "5. Future updates: sudo bash $APP_DIR/deploy/deploy_server.sh."
+echo "5. Future updates: sudo bash $CURRENT_RELEASE/deploy/deploy_server.sh."

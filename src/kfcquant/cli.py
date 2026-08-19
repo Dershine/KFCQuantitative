@@ -5,12 +5,15 @@ import subprocess
 import sys
 from datetime import date, datetime
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from kfcquant.config import SHANGHAI_TZ, get_settings
+from kfcquant.db import MIGRATIONS, Database
+from kfcquant.migrations import migration_contract
 from kfcquant.observability import configure_observability
 from kfcquant.runtime import health_info, version_info
 from kfcquant.scheduler import run_scheduler
@@ -80,9 +83,29 @@ def evaluate_morning() -> None:
 
 
 @app.command()
-def migrate() -> None:
-    workflow = _workflow()
-    console.print(f"schema version: {workflow.database.migration_version()}")
+def migrate(
+    database: Annotated[Path | None, typer.Option("--database", help="仅用于离线迁移预检的数据库路径")] = None,
+) -> None:
+    settings = get_settings()
+    database_path = database or settings.database_path
+    lock_path = settings.runtime_dir / "database.lock" if database is None else database_path.with_suffix(".lock")
+    store = Database(
+        database_path,
+        settings.initial_cash,
+        settings.database_lock_timeout_seconds,
+        lock_path,
+    )
+    store.initialize()
+    console.print(f"schema version: {store.migration_version()}")
+
+
+@app.command("migration-contract")
+def show_migration_contract(as_json: bool = typer.Option(False, "--json", help="输出机器可读JSON")) -> None:
+    payload = migration_contract(MIGRATIONS)
+    if as_json:
+        console.print_json(json.dumps(payload, ensure_ascii=False))
+    else:
+        console.print(payload)
 
 
 @app.command()

@@ -66,10 +66,16 @@ def create_app(settings: OpsSettings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.post("/ops/actions/deploy/{sha}")
-    def deploy(request: Request, sha: str, csrf: str = Form(...), confirm: str = Form(...)):
+    def deploy(
+        request: Request,
+        sha: str,
+        csrf: str = Form(...),
+        confirm: str = Form(...),
+        approve_irreversible: str = Form(""),
+    ):
         verify(request, csrf, confirm)
         try:
-            manager.request_deploy(sha)
+            manager.request_deploy(sha, approve_irreversible=approve_irreversible == "yes")
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(409, str(exc)) from exc
         return RedirectResponse("/ops/", status_code=303)

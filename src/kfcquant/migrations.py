@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
+from enum import StrEnum
 
 import duckdb
 
@@ -15,11 +18,49 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 """
 
 
+class RollbackPolicy(StrEnum):
+    """How an older release may recover after this migration is applied."""
+
+    IN_PLACE = "in_place"
+    BACKUP_RESTORE = "backup_restore"
+    REQUIRES_APPROVAL = "requires_approval"
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
     name: str
     statements: tuple[str, ...]
+    rollback_policy: RollbackPolicy | None = None
+    rollback_reason: str = ""
+
+
+def migration_contract(migrations: list[Migration] | tuple[Migration, ...]) -> dict[str, object]:
+    """Return a release's machine-readable schema and rollback contract."""
+
+    MigrationRunner._validate_registry(migrations)
+    missing = [migration.version for migration in migrations if migration.rollback_policy is None]
+    if missing:
+        raise ValueError(f"migrations require an explicit rollback policy: {missing}")
+    missing_reason = [migration.version for migration in migrations if not migration.rollback_reason.strip()]
+    if missing_reason:
+        raise ValueError(f"migrations require a rollback reason: {missing_reason}")
+    return {
+        "contract_version": 1,
+        "latest_schema_version": len(migrations),
+        "migrations": [
+            {
+                "version": migration.version,
+                "name": migration.name,
+                "statements_sha256": hashlib.sha256(
+                    json.dumps(migration.statements, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+                "rollback_policy": migration.rollback_policy.value,
+                "rollback_reason": migration.rollback_reason,
+            }
+            for migration in migrations
+        ],
+    }
 
 
 class MigrationRunner:

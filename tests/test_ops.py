@@ -15,9 +15,10 @@ def ops_settings(tmp_path):
     return OpsSettings(
         database_path=tmp_path / "ops.sqlite3",
         deployment_lock=tmp_path / "deploy.lock",
-        repository_directory=tmp_path,
-        virtualenv_directory=tmp_path / ".venv",
-        release_env_file=tmp_path / ".release.env",
+        repository_directory=tmp_path / "repository",
+        releases_directory=tmp_path / "releases",
+        current_release_link=tmp_path / "current",
+        builder_python=tmp_path / "python",
         research_database=tmp_path / "research.duckdb",
         backup_directory=tmp_path / "backups",
         github_repository="owner/repository",
@@ -83,13 +84,21 @@ def test_successful_deployment_records_rollback_material(tmp_path, monkeypatch):
     store.set("active_sha", "b" * 40)
     manager = DeploymentManager(settings, store)
     target = "a" * 40
+    previous_release = settings.releases_directory / ("b" * 40)
+    target_release = settings.releases_directory / target
+    previous_release.mkdir(parents=True)
+    target_release.mkdir(parents=True)
     deployment_id = store.create_deployment(target, "b" * 40, "checking", "test")
     monkeypatch.setattr(manager, "releases", lambda: [{"sha": target, "deployable": True}])
     monkeypatch.setattr(manager, "_research_job_running", lambda: False)
     monkeypatch.setattr(manager, "_run_git", lambda *args, **kwargs: "2026-08-15T00:00:00+08:00")
     monkeypatch.setattr(manager, "_run_service", lambda *args, **kwargs: "ok")
     monkeypatch.setattr(manager, "_run_application", lambda *args, **kwargs: "ok")
-    monkeypatch.setattr(manager, "_checkout_and_install", lambda *args, **kwargs: None)
+    monkeypatch.setattr(manager, "_active_release_path", lambda: previous_release)
+    monkeypatch.setattr(manager, "_build_release", lambda *args, **kwargs: target_release)
+    monkeypatch.setattr(manager, "_preflight_migrations", lambda *args, **kwargs: {"allowed": True})
+    monkeypatch.setattr(manager, "_run_release_application", lambda *args, **kwargs: "ok")
+    monkeypatch.setattr(manager, "_activate_release", lambda *args, **kwargs: None)
     monkeypatch.setattr(manager, "_wait_healthy", lambda: None)
 
     manager._deploy(deployment_id, target, "b" * 40)

@@ -13,9 +13,10 @@ class OpsSettings(BaseSettings):
 
     database_path: Path = Path("/var/lib/kfcops/ops.sqlite3")
     deployment_lock: Path = Path("/var/lib/kfcops/deploy.lock")
-    repository_directory: Path = Path("/opt/kfcquant/app")
-    virtualenv_directory: Path = Path("/opt/kfcquant/app/.venv")
-    release_env_file: Path = Path("/opt/kfcquant/app/.release.env")
+    repository_directory: Path = Path("/opt/kfcquant/repository")
+    releases_directory: Path = Path("/opt/kfcquant/releases")
+    current_release_link: Path = Path("/opt/kfcquant/current")
+    builder_python: Path = Path("/usr/bin/python3")
     service_control_command: Path = Path("/usr/local/sbin/kfcquant-service-control")
     research_database: Path = Path("/var/lib/kfcquant/data/kfcquant.duckdb")
     research_lock: Path = Path("/var/lib/kfcquant/runtime/database.lock")
@@ -40,6 +41,14 @@ class OpsSettings(BaseSettings):
             raise ValueError("research_health_url must use http or https")
         if self.github_repository.count("/") != 1 or any(not part for part in self.github_repository.split("/")):
             raise ValueError("github_repository must use owner/repository format")
+        repository = self.repository_directory.absolute()
+        releases = self.releases_directory.absolute()
+        current = self.current_release_link.absolute()
+        if len({repository, releases, current}) != 3:
+            raise ValueError("repository_directory, releases_directory, and current_release_link must be distinct")
+        pairs = ((repository, releases), (repository, current), (releases, current))
+        if any(left in right.parents or right in left.parents for left, right in pairs):
+            raise ValueError("repository, releases, and current link paths must not be nested unsafely")
         try:
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError as exc:

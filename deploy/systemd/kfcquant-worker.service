@@ -7,13 +7,13 @@ Wants=network-online.target
 Type=simple
 User=kfcquant
 Group=kfcquant
-WorkingDirectory=/opt/kfcquant/app
+WorkingDirectory=/opt/kfcquant/current
 EnvironmentFile=/etc/kfcquant/research.env
-EnvironmentFile=-/opt/kfcquant/app/.release.env
+EnvironmentFile=-/opt/kfcquant/current/.release.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 Environment=HOME=/var/lib/kfcquant
-ExecStart=/opt/kfcquant/app/.venv/bin/kfcquant scheduler
+ExecStart=/opt/kfcquant/current/.venv/bin/kfcquant scheduler
 Restart=always
 RestartSec=10
 UMask=0007

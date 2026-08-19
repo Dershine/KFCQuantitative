@@ -7,16 +7,16 @@ Wants=network-online.target
 Type=simple
 User=kfcquant
 Group=kfcquant
-WorkingDirectory=/opt/kfcquant/app
+WorkingDirectory=/opt/kfcquant/current
 EnvironmentFile=/etc/kfcquant/research.env
-EnvironmentFile=-/opt/kfcquant/app/.release.env
+EnvironmentFile=-/opt/kfcquant/current/.release.env
 Environment=KFCQUANT_DATABASE_READ_ONLY=true
 Environment=KFCQUANT_DATABASE_LOCK_TIMEOUT_SECONDS=2
 Environment=KFCQUANT_BASE_URL_PATH=research
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 Environment=HOME=/var/lib/kfcquant/runtime
-ExecStart=/opt/kfcquant/app/.venv/bin/kfcquant serve --host 127.0.0.1 --port 8501
+ExecStart=/opt/kfcquant/current/.venv/bin/kfcquant serve --host 127.0.0.1 --port 8501
 Restart=always
 RestartSec=5
 UMask=0007

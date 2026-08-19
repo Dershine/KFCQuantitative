@@ -30,12 +30,12 @@ case "${1:-}" in
     set -a
     # shellcheck disable=SC1091
     source /etc/kfcquant/research.env
-    if [[ -f /opt/kfcquant/app/.release.env ]]; then
+    if [[ -f /opt/kfcquant/current/.release.env ]]; then
       # shellcheck disable=SC1091
-      source /opt/kfcquant/app/.release.env
+      source /opt/kfcquant/current/.release.env
     fi
     set +a
-    exec /usr/sbin/runuser -u kfcquant --preserve-environment -- /opt/kfcquant/app/.venv/bin/kfcquant "$@"
+    exec /usr/sbin/runuser -u kfcquant --preserve-environment -- /opt/kfcquant/current/.venv/bin/kfcquant "$@"
     ;;
   *)
     echo "usage: kfcquant-service-control {start|stop|restart|restart-ops|is-active SERVICE|logs|app COMMAND}" >&2

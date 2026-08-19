@@ -226,13 +226,16 @@ CI同时对Research与Operations执行84%分支覆盖率门禁。类型检查覆
 
 ## Linux服务器原生部署
 
-生产服务器不要求Docker。标准形态为Git工作区、Python虚拟环境、三个systemd服务和Nginx：
+生产服务器不要求Docker。标准形态为控制仓库、不可变Release目录、原子`current`链接、三个systemd服务和Nginx：
 
 - 研究网页：`https://<服务器IP或域名>/research/`；
 - 运行管理器：`https://<服务器IP或域名>/ops/`；
 - `kfcquant-worker`是DuckDB唯一写入者；
 - `kfcquant-web`以只读模式访问数据库，并且只监听`127.0.0.1:8501`；
 - `kfcops`只接受通过`main`工作流验证的40位Git SHA；
+- `/opt/kfcquant/repository`只用于Git fetch和创建worktree；
+- 每个通过验证的版本位于`/opt/kfcquant/releases/<完整SHA>`并拥有独立`.venv`；
+- `/opt/kfcquant/current`原子指向Active Release，systemd和管理员命令只通过该链接运行；
 - 数据、报告和备份存放在`/var/lib/kfcquant/`，不会被Git更新覆盖。
 
 服务器需要Python 3.12或更高版本。生产依赖固定在`requirements.lock`；GitHub Actions会在Python 3.12上安装锁定依赖、执行Ruff和Pytest，并保存wheel构建产物。
@@ -248,8 +251,8 @@ sudo bash deploy/bootstrap_server.sh
 初始化脚本会：
 
 1. 安装Git、Python、Nginx、Basic Auth和证书工具；
-2. 将现有Git仓库安装到`/opt/kfcquant/app`；
-3. 创建生产虚拟环境并安装`requirements.lock`；
+2. 将现有Git仓库安装为`/opt/kfcquant/repository`控制仓库；
+3. 在`releases/<SHA>`创建初始Release及独立虚拟环境，并建立`current`链接；
 4. 创建`kfcquant-worker`、`kfcquant-web`和`kfcops`服务；
 5. 配置HTTPS、证书续期和受限的服务控制命令。
 
@@ -260,7 +263,9 @@ sudo bash deploy/bootstrap_server.sh
 /etc/kfcquant/ops.env       # GitHub只读令牌和运行管理器配置
 ```
 
-私有仓库还需要给`kfcops`系统用户配置只读Git deploy key，并把`/opt/kfcquant/app`的`origin`设为对应SSH地址。`KFCOPS_GITHUB_TOKEN`只用于读取提交和Actions状态，不会被写进Git remote。
+私有仓库还需要给`kfcops`系统用户配置只读Git deploy key，并把`/opt/kfcquant/repository`的`origin`设为对应SSH地址。`KFCOPS_GITHUB_TOKEN`只用于读取提交和Actions状态，不会被写进Git remote。
+
+从旧版`/opt/kfcquant/app`共享工作区布局升级时，应从已更新的源码目录重新执行一次`bootstrap_server.sh`，让脚本建立控制仓库、首个独立Release、`current`链接并更新systemd单元；脚本不会删除旧目录或研究数据。确认新服务健康后再由运维者自行归档旧目录。
 
 填写配置后执行：
 
@@ -278,16 +283,24 @@ sudo kfcquant-admin sync-eod --start "$start_date" --end "$end_date"
 不传参数时部署远端`main`的最新提交：
 
 ```bash
-sudo bash /opt/kfcquant/app/deploy/deploy_server.sh
+sudo bash /opt/kfcquant/current/deploy/deploy_server.sh
 ```
 
 也可以部署明确的已测试版本：
 
 ```bash
-sudo bash /opt/kfcquant/app/deploy/deploy_server.sh <完整40位commit SHA>
+sudo bash /opt/kfcquant/current/deploy/deploy_server.sh <完整40位commit SHA>
 ```
 
-发布管理器依次验证GitHub Actions、检查交易窗口和运行中任务、拉取Git提交、停止研究服务、备份DuckDB、安装锁定依赖、迁移、启动并执行健康检查。失败时自动恢复上一提交和部署前数据库备份，默认保留最近7份备份。
+发布管理器依次验证GitHub Actions、检查交易窗口和运行中任务、拉取Git提交，在独立Release目录构建并安装锁定依赖，然后读取Active/Target的机器可读迁移契约，并在正式数据库的临时副本上完成迁移预演。只有构建与预检全部通过后才停止研究服务、备份DuckDB、迁移正式库并原子切换`current`，随后启动并执行健康检查。构建或预检失败不会停止或污染Active Release；迁移、启动或健康检查失败会原子恢复旧链接和部署前数据库备份，默认保留最近7份备份。
+
+每个迁移必须声明`in_place`、`backup_restore`或`requires_approval`回滚策略及理由。未知策略、Schema降级、契约缺失和未批准的不可逆迁移都会失败关闭。只有已审查迁移确实需要时才可显式批准：
+
+```bash
+sudo bash /opt/kfcquant/current/deploy/deploy_server.sh <完整40位commit SHA> --approve-irreversible-migration
+```
+
+该参数只放行迁移契约中明确标记为`requires_approval`的版本，不会跳过数据库副本预演、备份、健康检查或自动回滚。
 
 Research与Operations配置在进程启动前统一校验。Operations的`KFCOPS_SESSION_SECRET`必须是至少32字符的非默认值；矛盾的保护窗口、非法Provider、无效费用/仓位比例或缺少所选Tushare模式的Token都会使启动失败关闭。
 

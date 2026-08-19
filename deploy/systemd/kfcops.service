@@ -7,21 +7,21 @@ Wants=network-online.target
 Type=simple
 User=kfcops
 Group=kfcquant
-WorkingDirectory=/opt/kfcquant/app
+WorkingDirectory=/opt/kfcquant/current
 EnvironmentFile=/etc/kfcquant/research.env
 EnvironmentFile=/etc/kfcquant/ops.env
-EnvironmentFile=-/opt/kfcquant/app/.release.env
+EnvironmentFile=-/opt/kfcquant/current/.release.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 Environment=HOME=/var/lib/kfcops
-ExecStart=/opt/kfcquant/app/.venv/bin/kfcops serve --host 127.0.0.1 --port 8600
+ExecStart=/opt/kfcquant/current/.venv/bin/kfcops serve --host 127.0.0.1 --port 8600
 Restart=always
 RestartSec=5
 UMask=0007
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/kfcops /var/lib/kfcquant /opt/kfcquant/app
+ReadWritePaths=/var/lib/kfcops /var/lib/kfcquant /opt/kfcquant
 
 [Install]
 WantedBy=multi-user.target

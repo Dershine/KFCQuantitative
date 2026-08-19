@@ -18,7 +18,7 @@ from kfcquant.application.errors import JobAlreadyRunningError, JobLeaseLostErro
 from kfcquant.experiments import ExperimentRecord
 from kfcquant.ingestion import IngestionManifest, MarketDatasetKind
 from kfcquant.market_data import DAILY_BAR_SCHEMA, LIVE_QUOTE_SCHEMA, SECURITY_SCHEMA, TRADE_CALENDAR_SCHEMA
-from kfcquant.migrations import Migration, MigrationRunner
+from kfcquant.migrations import Migration, MigrationRunner, RollbackPolicy
 from kfcquant.models import (
     READABLE_RESEARCH_RUN_STATES,
     CandidateOutcome,
@@ -269,9 +269,19 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 """
 
+def _release_migration(version: int, name: str, statements: tuple[str, ...]) -> Migration:
+    return Migration(
+        version,
+        name,
+        statements,
+        RollbackPolicy.BACKUP_RESTORE,
+        "The previous release is recovered together with its deployment-time database backup.",
+    )
+
+
 MIGRATIONS = (
-    Migration(1, "initial_schema", (SCHEMA_SQL,)),
-    Migration(
+    _release_migration(1, "initial_schema", (SCHEMA_SQL,)),
+    _release_migration(
         2,
         "dual_signal_fields_and_historical_st",
         (
@@ -285,7 +295,7 @@ MIGRATIONS = (
             "UPDATE signal_runs SET information_cutoff=as_of WHERE information_cutoff IS NULL",
         ),
     ),
-    Migration(
+    _release_migration(
         3,
         "research_run_lifecycle",
         (
@@ -297,7 +307,7 @@ MIGRATIONS = (
                ELSE 'published' END""",
         ),
     ),
-    Migration(
+    _release_migration(
         4,
         "job_leases",
         (
@@ -313,7 +323,7 @@ MIGRATIONS = (
                ON CONFLICT (job_run_id) DO NOTHING""",
         ),
     ),
-    Migration(
+    _release_migration(
         5,
         "strategy_attributions",
         (
@@ -328,7 +338,7 @@ MIGRATIONS = (
                )""",
         ),
     ),
-    Migration(
+    _release_migration(
         6,
         "ingestion_manifests",
         (
@@ -347,7 +357,7 @@ MIGRATIONS = (
                )""",
         ),
     ),
-    Migration(
+    _release_migration(
         7,
         "research_run_manifests",
         (
@@ -371,7 +381,7 @@ MIGRATIONS = (
                )""",
         ),
     ),
-    Migration(
+    _release_migration(
         8,
         "llm_call_traces",
         (
@@ -399,7 +409,7 @@ MIGRATIONS = (
                )""",
         ),
     ),
-    Migration(
+    _release_migration(
         9,
         "multi_entity_intelligence",
         (
@@ -427,7 +437,7 @@ MIGRATIONS = (
                ON CONFLICT (event_id, ts_code) DO NOTHING""",
         ),
     ),
-    Migration(
+    _release_migration(
         10,
         "strategy_experiments",
         (
