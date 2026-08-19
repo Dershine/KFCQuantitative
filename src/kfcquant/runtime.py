@@ -5,13 +5,14 @@ import json
 import os
 import shutil
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
 from kfcquant import __version__
 from kfcquant.config import SHANGHAI_TZ, Settings
 from kfcquant.db import Database
+from kfcquant.observability import AlertCode, MetricName, Observability, get_observability
 
 
 @lru_cache(maxsize=1)
@@ -77,12 +78,63 @@ def write_heartbeat(settings: Settings) -> None:
     temporary.replace(path)
 
 
-def health_info(settings: Settings) -> dict[str, object]:
+def observe_worker_heartbeat(
+    settings: Settings,
+    observability: Observability | None = None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    observability = observability or get_observability()
+    observed_at = now or datetime.now(SHANGHAI_TZ)
+    path = heartbeat_path(settings)
+    if not path.exists():
+        observability.alert(
+            AlertCode.WORKER_HEARTBEAT_MISSING,
+            "worker heartbeat file is missing",
+            dedup_key=str(path),
+            stage="worker.heartbeat",
+        )
+        return {"ok": False, "message": "heartbeat missing"}
+    try:
+        heartbeat = json.loads(path.read_text(encoding="utf-8"))
+        heartbeat_at = datetime.fromisoformat(str(heartbeat["at"]))
+        if heartbeat_at.tzinfo is None:
+            raise ValueError("worker heartbeat timestamp must include timezone")
+        age_seconds = max(0.0, (observed_at - heartbeat_at).total_seconds())
+        observability.metric(
+            MetricName.WORKER_HEARTBEAT_AGE_SECONDS,
+            age_seconds,
+            unit="seconds",
+            stage="worker.heartbeat",
+        )
+        heartbeat["age_seconds"] = age_seconds
+        heartbeat["ok"] = age_seconds <= settings.worker_heartbeat_stale_seconds
+        if not heartbeat["ok"]:
+            observability.alert(
+                AlertCode.WORKER_HEARTBEAT_STALE,
+                "worker heartbeat exceeded the configured freshness threshold",
+                dedup_key=str(path),
+                stage="worker.heartbeat",
+            )
+        return heartbeat
+    except Exception as exc:
+        observability.alert(
+            AlertCode.WORKER_HEARTBEAT_STALE,
+            "worker heartbeat is unreadable",
+            dedup_key=str(path),
+            stage="worker.heartbeat",
+        )
+        return {"ok": False, "error": type(exc).__name__}
+
+
+def health_info(settings: Settings, observability: Observability | None = None) -> dict[str, object]:
+    observability = observability or get_observability()
     database = Database(
         settings.database_path,
         settings.initial_cash,
         settings.database_lock_timeout_seconds,
         settings.runtime_dir / "database.lock",
+        observability=observability,
     )
     result: dict[str, object] = {
         "status": "ok",
@@ -105,18 +157,9 @@ def health_info(settings: Settings) -> dict[str, object]:
     except Exception as exc:
         result["status"] = "degraded"
         result["database"] = {"ok": False, "error": str(exc)}
-    path = heartbeat_path(settings)
-    if path.exists():
-        try:
-            heartbeat = json.loads(path.read_text(encoding="utf-8"))
-            heartbeat_at = datetime.fromisoformat(str(heartbeat["at"]))
-            heartbeat["ok"] = datetime.now(SHANGHAI_TZ) - heartbeat_at <= timedelta(minutes=3)
-            result["worker"] = heartbeat
-            if not heartbeat["ok"]:
-                result["status"] = "degraded"
-        except Exception as exc:
-            result["worker"] = {"ok": False, "error": str(exc)}
-            result["status"] = "degraded"
+    result["worker"] = observe_worker_heartbeat(settings, observability)
+    if not result["worker"]["ok"]:
+        result["status"] = "degraded"
     usage = shutil.disk_usage(settings.database_path.parent.resolve())
     result["disk"] = {"free_bytes": usage.free, "total_bytes": usage.total, "ok": usage.free > 1_000_000_000}
     if not result["disk"]["ok"]:

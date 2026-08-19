@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 from kfcquant.config import SHANGHAI_TZ, get_settings
+from kfcquant.observability import configure_observability
 from kfcquant.runtime import health_info, version_info
 from kfcquant.scheduler import run_scheduler
 from kfcquant.services.workflow import Workflow
@@ -20,7 +21,8 @@ console = Console()
 
 
 def _workflow() -> Workflow:
-    return Workflow(get_settings())
+    settings = get_settings()
+    return Workflow(settings, observability=configure_observability(settings))
 
 
 def _date(value: str | None, default: date) -> date:
@@ -85,7 +87,8 @@ def migrate() -> None:
 
 @app.command()
 def health(as_json: bool = typer.Option(False, "--json", help="输出机器可读JSON")) -> None:
-    payload = health_info(get_settings())
+    settings = get_settings()
+    payload = health_info(settings, configure_observability(settings))
     if as_json:
         console.print_json(json.dumps(payload, ensure_ascii=False, default=str))
     else:

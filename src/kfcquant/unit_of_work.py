@@ -16,6 +16,7 @@ from kfcquant.models import (
     RunStatus,
     SignalRun,
 )
+from kfcquant.observability import MetricName, Observability, get_observability
 from kfcquant.run_manifest import ResearchRunManifest, candidate_result_sha256
 from kfcquant.strategy_identity import canonical_parameter_json
 
@@ -48,8 +49,9 @@ class ResearchRunUnitOfWork(Protocol):
 class DuckDBResearchRunUnitOfWork:
     """Atomically expose one terminal Research Run and all of its publication rows."""
 
-    def __init__(self, database: Database):
+    def __init__(self, database: Database, observability: Observability | None = None):
         self.database = database
+        self.observability = observability or get_observability()
 
     @staticmethod
     def _validate(
@@ -233,6 +235,11 @@ class DuckDBResearchRunUnitOfWork:
             try:
                 if self._is_identical_existing_publication(connection, run, candidates, orders, job, manifest):
                     connection.execute("COMMIT")
+                    self.observability.event(
+                        "research_run_commit_idempotent",
+                        job_run_id=job.job_run_id,
+                        signal_run_id=run.run_id,
+                    )
                     return False
                 self.database._assert_active_job_lease(connection, job.job_run_id, job.finished_at)
                 self.database._write_signal_run(connection, run)
@@ -259,6 +266,35 @@ class DuckDBResearchRunUnitOfWork:
                 self.database._complete_job_lease(connection, job.job_run_id, job.finished_at)
                 self._checkpoint("job")
                 connection.execute("COMMIT")
+                with self.observability.context(
+                    job_run_id=job.job_run_id,
+                    signal_run_id=run.run_id,
+                    strategy_id=run.strategy_id,
+                    strategy_version=run.strategy_version,
+                    source_sha=manifest.source_sha if manifest else None,
+                    stage="research-run.publish",
+                    information_cutoff=run.information_cutoff,
+                ):
+                    self.observability.event(
+                        "research_run_committed",
+                        lifecycle_state=run.lifecycle_state.value,
+                        candidate_count=len(candidates),
+                        order_count=len(orders),
+                    )
+                    duration = max(0.0, (job.finished_at - job.started_at).total_seconds())
+                    self.observability.metric(
+                        MetricName.JOB_DURATION_SECONDS,
+                        duration,
+                        unit="seconds",
+                        labels={"job_name": job.job_name, "status": job.status},
+                    )
+                    status_metrics = {
+                        "success": MetricName.JOB_SUCCESS_TOTAL,
+                        "failed": MetricName.JOB_FAILED_TOTAL,
+                        "missed": MetricName.JOB_MISSED_TOTAL,
+                    }
+                    if metric := status_metrics.get(job.status):
+                        self.observability.metric(metric, 1, labels={"job_name": job.job_name})
                 LOGGER.info(
                     "research run committed run_id=%s state=%s candidates=%s orders=%s job_run_id=%s",
                     run.run_id,
@@ -270,5 +306,15 @@ class DuckDBResearchRunUnitOfWork:
                 return True
             except Exception:
                 connection.execute("ROLLBACK")
+                with self.observability.context(
+                    job_run_id=job.job_run_id,
+                    signal_run_id=run.run_id,
+                    strategy_id=run.strategy_id,
+                    strategy_version=run.strategy_version,
+                    source_sha=manifest.source_sha if manifest else None,
+                    stage="research-run.publish",
+                    information_cutoff=run.information_cutoff,
+                ):
+                    self.observability.event("research_run_rolled_back", severity="error")
                 LOGGER.exception("research run transaction rolled back run_id=%s", run.run_id)
                 raise

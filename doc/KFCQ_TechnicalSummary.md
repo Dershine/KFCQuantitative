@@ -10,7 +10,7 @@
 | 首次建立 | 2026-08-15 |
 | 最近复核 | 2026-08-19 |
 | 项目版本基线 | `0.2.0` |
-| 源码基线 | `50deeadf773c559ee04285e74f2012b26b97dcf6`（M5-A实施前基线；M5-A实现与本文更新已纳入当前提交） |
+| 源码基线 | `5be4d10c5647cd47526925606df24fc1fa496668`（M5-B/M5-C实现与本文更新位于当前未提交工作区） |
 | 适用范围 | Research Service、Operations Manager、数据与部署基础设施 |
 | 目标读者 | 项目维护者、策略开发者、代码审查者、部署维护者 |
 | 领域语言 | 以根目录 `CONTEXT.md` 为准 |
@@ -97,11 +97,11 @@ KFCQuant 当前是一个面向个人使用、强调可审计和安全降级的 A
 | 影子组合一致性 | 中高 | 买卖成交具备事务和幂等保护 |
 | 部署与回滚 | 较高 | 具备CI验证、备份、健康检查和自动回滚 |
 | 单策略可维护性 | 中高 | 股票池、特征、技术评分、资讯风险和选择Policy已分离并独立测试 |
-| 应用与持久化边界 | 中高 | Workflow已拆为独立应用用例；领域服务只接收上下文最小Repository能力，依赖组装与Dashboard查询模型待M5-B收口 |
+| 应用与持久化边界 | 高 | Workflow已拆为独立应用用例；领域服务只接收上下文最小Repository能力；Composition Root集中组装依赖，Dashboard只消费显式只读查询模型 |
 | 多策略演进 | 较高 | Strategy契约、Registry、归属、参数身份与Golden Snapshot回归基线已建立 |
 | 严格可复现性 | 较高 | Published Run已有完整版本清单、精确输入快照、Hash和上游批次引用；风险事件可继续定位Prompt与LLM调用版本 |
 | 故障恢复 | 高 | Signal发布已整体原子化；Job具备续租、竞争隔离、过期回收和迟到写入隔离 |
-| 可观测性 | 中等 | 有Job、心跳和健康状态，缺少结构化指标与告警 |
+| 可观测性 | 中高 | JSON关联日志、类型化运行指标、本地审计、去重告警与可选Webhook已建立；独立外部心跳探针和生产告警接收端仍需部署验证 |
 | 回放与实验 | 高 | Replay、实时共核和隔离历史Simulator已形成闭环；Experiment以同一内容寻址数据集比较基线/候选，记录声明的验收标准、指标、数据质量、结论和可复算Hash |
 
 最重要的长期演进支点是：
@@ -193,8 +193,8 @@ flowchart LR
 | Strategy | `strategy/*`、`services/scoring.py` | 策略身份、输入契约、注册组装、股票池、特征、评分、风险门禁、候选选择 | StrategyContext、StrategyResult |
 | Portfolio | `services/portfolio.py`、`db.py` | 订单、成交、现金、仓位、退出策略 | PaperOrder、PaperFill、PaperPosition |
 | Evaluation | `services/evaluation.py`、`experiments.py` | 信号、组合、数据质量指标与可审计Strategy实验 | CandidateOutcome、OpportunityOutcome、ExperimentRecord |
-| Research Run | `application/use_cases.py`、`services/workflow.py` | 独立应用用例编排原子、可恢复、可追踪的运行；Workflow保留兼容Facade | Run Manifest、Signal Run |
-| Presentation | `cli.py`、`dashboard.py`、reports | 人机交互与只读展示 | CLI、Web、Markdown Report |
+| Research Run | `bootstrap.py`、`application/use_cases.py`、`services/workflow.py` | Composition Root组装独立应用用例，编排原子、可恢复、可追踪的运行；Workflow保留兼容Facade | Run Manifest、Signal Run |
+| Presentation | `cli.py`、`dashboard.py`、reports | 人机交互与只读展示；Dashboard通过Query Model消费稳定投影 | CLI、Web、Markdown Report |
 | Operations | `kfcops/*`、`deploy/*` | 发布、回滚、健康和运维审计 | Release、Deployment、Runtime State |
 
 ---
@@ -206,7 +206,9 @@ flowchart LR
 ```text
 KFCQuantitative/
 ├── src/kfcquant/                 Research Service
-│   ├── application/              独立Command/Query用例、持久化端口与应用错误
+│   ├── application/              独立Command/Query用例、持久化端口、Dashboard查询契约与应用错误
+│   ├── bootstrap.py              Research与Dashboard的Composition Root
+│   ├── observability.py           关联上下文、脱敏JSON日志、类型化指标、审计与告警分发
 │   ├── providers/                外部数据与LLM适配器
 │   ├── services/                 评分、资讯、组合、评估、报告与Workflow兼容Facade
 │   ├── strategy/                 Strategy契约、股票池、特征、评分、风险与Registry组装
@@ -223,6 +225,7 @@ KFCQuantitative/
 │   ├── migrations.py             有序、事务化DuckDB迁移Runner
 │   ├── unit_of_work.py            Research Run原子发布事务边界
 │   ├── repositories.py           按上下文收窄的DuckDB Repository适配器
+│   ├── query_models.py            Dashboard只读DuckDB投影适配器
 │   ├── db.py                     DuckDB Schema、迁移注册和底层持久化实现
 │   ├── scheduler.py              APScheduler任务注册
 │   ├── cli.py                    Typer命令入口
@@ -245,8 +248,9 @@ KFCQuantitative/
 ```mermaid
 flowchart TD
     Entry["Typer CLI / APScheduler"] --> Workflow["Workflow Facade"]
-    Workflow --> UseCases["Application Use Cases"]
-    Workflow --> ProviderFactory["Provider Factory"]
+    Workflow --> Bootstrap["Composition Root"]
+    Bootstrap --> UseCases["Application Use Cases"]
+    Bootstrap --> ProviderFactory["Provider Factory"]
     ProviderFactory --> MarketProvider["MarketDataProvider"]
     ProviderFactory --> LiveProvider["LiveQuoteProvider"]
     ProviderFactory --> NewsProvider["NewsProvider"]
@@ -269,8 +273,9 @@ flowchart TD
     Reports --> Repositories
     Repositories --> Database
     Database --> DuckDB["DuckDB"]
-    Workflow --> Parquet["Raw Parquet Snapshots"]
-    Dashboard["Streamlit Dashboard"] --> Database
+    UseCases --> Parquet["Raw Parquet Snapshots"]
+    Dashboard["Streamlit Dashboard"] --> QueryModel["Dashboard Query Model"]
+    QueryModel --> Database
 ```
 
 ### 4.3 主要运行序列
@@ -370,6 +375,9 @@ flowchart TD
 - worker是唯一正式写入者，Dashboard以只读模式运行；
 - 所有连接使用同一个跨进程文件锁，包括只读连接；
 - News、Portfolio、Evaluation与Report服务只接收各自的Repository Protocol；DuckDB按Market、Research、Job、News、Portfolio、Evaluation和Report提供显式窄适配器，底层Database不再直接暴露给这些服务；
+- `bootstrap.py`是Research应用和Dashboard查询的统一Composition Root；Workflow Facade不再构造Database、Provider、Repository、Strategy或服务，既有显式测试注入和兼容属性保持不变；
+- Composition Root为Job、Provider、数据库锁、资讯/LLM、策略结果、组合拒单和Research Run发布注入统一Observability；CLI/Scheduler把既有应用日志转为单行JSON，指标和告警在`runtime/`下以独立JSONL审计，可选Webhook默认关闭；
+- Dashboard只依赖类型化`DashboardQueryModel`，通过Signal、Portfolio、Trading、Evaluation、Data Health和Report投影读取数据；页面不再持有Database、不使用自由表名，也不再自行合并持仓与Quote；DuckDB适配器全部通过只读连接查询；
 - 候选因子、风险ID和元数据以JSON保存，便于演进但不利于强约束查询；
 - 买卖成交已使用显式数据库事务；
 - Signal Run具有类型化生命周期，业务查询只消费明确可读终态；
@@ -407,9 +415,12 @@ flowchart TD
 | 检查 | 结果 |
 |---|---|
 | Ruff | 通过 |
-| Pytest | 302项通过 |
-| 总覆盖率 | 85%（Research Service，含分支） |
-| `application/use_cases.py` | 82%（含分支） |
+| Pytest | 320项通过 |
+| 总覆盖率 | 86%（Research Service，含分支） |
+| `observability.py` | 91%（含分支） |
+| `bootstrap.py` | 90%（含分支） |
+| `application/queries.py`、`query_models.py` | 100%（含分支） |
+| `application/use_cases.py` | 83%（含分支） |
 | `repositories.py` | 91%（含分支） |
 | `experiments.py` | 100%（含分支） |
 | `historical_simulator.py` | 96%（含分支） |
@@ -421,13 +432,13 @@ flowchart TD
 | `strategy/*` | 100%语句与分支覆盖 |
 | `services/scoring.py` | 95%（含分支） |
 | `policies.py` | 89%（含分支） |
-| `db.py` | 86%（含分支） |
+| `db.py` | 88%（含分支） |
 | `unit_of_work.py` | 100% |
 | `models.py` | 95%（含分支） |
-| `providers/qwen.py`、`services/news.py` | 79% / 82%（含分支；未覆盖主要为报告/healthcheck和外部下载分支） |
-| `services/portfolio.py` | 76%（含分支） |
-| `services/workflow.py` | 86%（含分支；仅保留兼容Facade与阶段内临时依赖组装） |
-| CLI、Scheduler、Dashboard | CLI与Dashboard 0%；Scheduler 91%（含分支） |
+| `providers/qwen.py`、`services/news.py` | 79% / 86%（含分支；未覆盖主要为报告/healthcheck和外部下载分支） |
+| `services/portfolio.py` | 78%（含分支） |
+| `services/workflow.py` | 81%（含分支；仅保留Composition Root转交与兼容Facade） |
+| CLI、Scheduler、Runtime、Dashboard | CLI与Dashboard源码模块0%；Scheduler 80%、Runtime 58%（含分支）；Dashboard空库AppTest烟雾通过 |
 
 已有测试重点覆盖：
 
@@ -458,15 +469,18 @@ flowchart TD
 - 历史Simulator只消费类型化Signal/Candidate、Daily Bar与显式交易日序列，不依赖Provider、DuckDB或实时影子账户；费用、最低佣金、印花税、滑点、整手、仓位、T+1、最大持有期和不可成交门禁均由不可变配置给出。买卖成本与实时`FeeModel`逐字段一致，Morning、blocked及`tradable=false`无买单，停牌/无成交/涨停买/跌停卖失败关闭，同Bar止损优先、现金守恒、确定性重跑和提交前故障不发布部分结果均有离线证据。
 - Experiment Dataset对输入快照Hash、市场数据Hash和严格递增交易日生成稳定身份；两臂完整Strategy Identity和结果Hash、类型化标准、逐项判定、自动结论与记录Hash可复算。分层收益、MFE/MAE、回撤、换手、可评估率、拒单计数及缺失权益估值失败关闭均有离线证据；Schema v10空库、v9升级、重复迁移、中途失败恢复、记录幂等/冲突和事务回滚通过。
 - Workflow公开入口通过11个单一`execute`应用用例委派；Market/Research/Job/News/Portfolio/Evaluation/Report Repository边界可运行时验证，服务构造器不再接收完整Database。租约丢失、Provider构造失败、日历确认、成交/监控窗口、评价、复盘和过期Job恢复均有独立Fake测试，两时段、原子发布、时间边界与组合安全回归保持通过。
+- Composition Root显式注入Database、Provider、Clock、Strategy Registry与UoW，Workflow源码不再导入具体Database、Provider Factory或Repository；Python版本猴补契约、CLI/Scheduler兼容入口和既有测试属性保持可用。
+- Dashboard Query Model在空库、Published Signal、无Quote持仓及组合/交易/评估/健康/风险资讯/报告数据上具有真实DuckDB组件测试；全部方法只读，查询前后数据库文件Hash不变，Query Model语句与分支覆盖率100%，Streamlit七标签空库烟雾无异常。
+- 统一Observability把Job、Run、Strategy、Provider、源码SHA、阶段和information cutoff写为脱敏单行JSON；类型化最小指标覆盖Job、Provider、Quote/EOD、资讯/LLM、候选、拒单、数据库锁和worker心跳。Fake Webhook、本地JSONL、冷却去重、投递失败、锁超时、心跳缺失/过期、资讯异常/积压和stale Quote无买单均有离线证据。
 
 尚未形成强保护的区域：
 
 - Scheduler任务重叠与错过恢复；
-- Dashboard完整烟雾和数据契约；
+- Dashboard交互控件、非空全页面渲染和生产规模查询性能；
 - 部署过程中断、依赖半安装和回滚演练；
-- Provider在线原始样本的持续监测、质量报告与主动告警；
+- Provider在线原始样本的持续质量监测；
 - 历史重放与实时信号一致性；
-- 结构化日志、指标和告警。
+- 独立于worker进程的生产心跳探针、真实告警接收端演练和JSONL轮转/保留策略。
 
 ---
 
@@ -509,9 +523,9 @@ flowchart TD
 | TD-007 | HIGH | 缺少完整Run Manifest和数据快照引用 | 新Published Run已原子关联精确输入快照、Hash和上游批次；旧Run不伪造 | M3 | `DONE` |
 | TD-008 | HIGH | Provider以无Schema的DataFrame作为跨层契约 | 外部字段、类型或单位漂移可能静默污染结果 | M3 | `DONE` |
 | TD-009 | HIGH | 实时与Replay曾缺少共享执行Runner | 两条路径现统一经过StrategyExecutionRunner并核对Identity与结果Hash | M4 | `DONE` |
-| TD-010 | MEDIUM | `Workflow`和`Database`职责过多 | Workflow已收缩为兼容Facade，应用逻辑进入独立用例；服务通过上下文Repository适配器隔离底层Database | M5 | `DONE` |
+| TD-010 | MEDIUM | `Workflow`和`Database`职责过多 | Workflow仅保留兼容委派，Composition Root集中组装；应用用例/服务通过Repository、Dashboard通过Query Model隔离底层Database | M5 | `DONE` |
 | TD-011 | MEDIUM | 读写共用全局文件锁 | Dashboard和多策略并行扩展受限 | M5/M6 | `NOT_STARTED` |
-| TD-012 | MEDIUM | 日志、指标和告警未形成统一体系 | 故障发现和根因定位依赖人工查看 | M5 | `NOT_STARTED` |
+| TD-012 | MEDIUM | 日志、指标和告警曾未形成统一体系 | 已建立关联上下文、脱敏JSON、类型化指标、本地审计、去重告警和可选Webhook；生产独立探针与接收端演练作为运维配置保留 | M5 | `DONE` |
 | TD-013 | MEDIUM | 部署原地修改工作区和活跃虚拟环境 | pip中断可能留下半更新环境 | M6 | `NOT_STARTED` |
 | TD-014 | MEDIUM | 资讯曾只支持单一`ts_code`归属 | 文档/风险事件已通过显式关系支持多证券、相关度与来源，旧单证券记录兼容 | M3 | `DONE` |
 | TD-015 | MEDIUM | LLM Prompt与响应曾缺少完整版本和追踪元数据 | 风险事件已关联Prompt/Input/Response Hash、模型、耗时和失败元数据 | M3 | `DONE` |
@@ -695,7 +709,7 @@ flowchart LR
 | M2 | 建立可插拔策略内核 | Strategy契约、策略注册、版本化参数和归属贯穿核心模型 | `DONE` |
 | M3 | 建立严格数据与模型血缘 | Run Manifest、数据Schema、快照引用、Prompt追踪可查询 | `DONE` |
 | M4 | 建立实时/历史共核的Replay与实验体系 | 固定快照重放结果一致，可比较基线和候选策略 | `DONE` |
-| M5 | 降低长期维护和运营成本 | 用例与Repository边界明确，结构化观测和质量门禁完善 | `NOT_STARTED` |
+| M5 | 降低长期维护和运营成本 | 用例与Repository边界明确，结构化观测和质量门禁完善 | `IN_PROGRESS` |
 | M6 | 强化发布并基于证据决定扩展 | 原子Release、恢复演练通过，数据库扩展有量化门槛 | `NOT_STARTED` |
 
 推荐顺序不是简单的代码美化顺序。M1先保护正确性，M2再释放策略演进能力，M3和M4建立研究可信度，M5和M6最后解决规模化维护问题。
@@ -826,19 +840,23 @@ M4进度：`30 / 30 = 100%`。完成条件已满足：基线与候选Strategy可
 |---|---|---:|---|---|---|
 | M5-01 | Workflow拆为应用用例 | 5 | 独立Command/Query用例 | 单个用例不拥有无关职责 | `DONE` |
 | M5-02 | Database拆为Repository | 5 | 按上下文拆分接口与实现 | 服务只获得最小所需持久化能力 | `DONE` |
-| M5-03 | 依赖组装入口 | 3 | `bootstrap.py`或等价Composition Root | 领域和用例不自行构造基础设施 | `NOT_STARTED` |
-| M5-04 | 结构化日志 | 3 | JSON日志与关联ID | Job、Run、Strategy、Provider和阶段可串联查询 | `NOT_STARTED` |
-| M5-05 | 指标与告警 | 5 | 运行、数据、锁、LLM和组合指标 | 14:40失败、心跳丢失和资讯异常可主动通知 | `NOT_STARTED` |
-| M5-06 | Dashboard Query Model | 3 | 只读投影或物化查询 | 页面不直接拼接全部领域表语义 | `NOT_STARTED` |
+| M5-03 | 依赖组装入口 | 3 | `bootstrap.py`或等价Composition Root | 领域和用例不自行构造基础设施 | `DONE` |
+| M5-04 | 结构化日志 | 3 | JSON日志与关联ID | Job、Run、Strategy、Provider和阶段可串联查询 | `DONE` |
+| M5-05 | 指标与告警 | 5 | 运行、数据、锁、LLM和组合指标 | 14:40失败、心跳丢失和资讯异常可主动通知 | `DONE` |
+| M5-06 | Dashboard Query Model | 3 | 只读投影或物化查询 | 页面不直接拼接全部领域表语义 | `DONE` |
 | M5-07 | CI质量门禁 | 3 | 覆盖率阈值、类型检查、安全扫描 | 质量退化和已知高危依赖能阻断合并 | `NOT_STARTED` |
 | M5-08 | 故障注入测试 | 5 | 数据源、锁、崩溃和恢复场景 | 关键故障路径具有自动化证据 | `NOT_STARTED` |
 
 M5总点数：`32`。完成条件：核心模块边界可由接口和CI验证，而不只是目录约定。
 
-M5进度：`10 / 32 = 31.25%`。M5-A已完成；M5-B至M5-D尚未开始。
+M5进度：`24 / 32 = 75%`。M5-A、M5-B、M5-C已完成；M5-D尚未开始。
 
 - M5-01证据：原843行、25方法的Workflow已收缩为兼容Facade，诊断、EOD、日历、Morning、Pre-close、两类评价、Fill、持仓监控、Post-close和过期Job恢复分别由11个只有单一公开`execute`入口的应用用例承载；CLI、Scheduler以及测试使用的Workflow属性和方法保持兼容。两时段运行、Manifest、原子发布、时间边界、Provider失败关闭和组合安全回归通过。
 - M5-02证据：新增Market、Research、Job、News、Portfolio、Candidate Evaluation与Report七类Repository Protocol及显式DuckDB适配器；News、Portfolio、Evaluation和Report服务构造器只接收各自最小能力，运行时适配器不暴露其他上下文方法。Research Run UoW仍直接持有DuckDB事务实现，未拆散Run、Manifest、Candidates、Orders与Job的单事务发布边界。
+- M5-03证据：新增唯一`bootstrap.py` Composition Root，集中组装Database、七类Repository、Provider、Snapshot Store、Point-in-time Gateway、Strategy、领域服务、UoW和11个应用用例；Workflow不再导入或构造具体基础设施，只保留兼容委派。显式Database/Provider/Clock/Registry/UoW注入、Facade属性、Python版本契约与CLI/Scheduler路径回归通过。
+- M5-06证据：新增类型化`DashboardQueryModel`及DuckDB只读适配器，以Signal、Portfolio、Trading、Evaluation、Data Health和Report投影封装页面查询；Dashboard不再导入Database、使用自由表名或合并持仓/Quote。空库、Published Signal、无Quote持仓、跨上下文投影、风险事件定向查询、查询前后文件Hash和Streamlit七标签烟雾通过；Query Model含分支覆盖率100%。
+- M5-04证据：新增类型化Observability Context和单行JSON Sink，统一字段覆盖`job_run_id`、`signal_run_id`、Strategy ID/版本、源码SHA、Provider、stage和information cutoff；既有应用Logger由同一Handler结构化，Bearer、授权/密钥字段、显式secret和URL敏感查询参数在输出前脱敏。离线Pre-close贯穿证明Provider、候选指标与原子发布事件可由同一Job/Run串联；显式Provider注入身份保持兼容。
+- M5-05证据：最小指标枚举覆盖Job耗时/终态、Provider耗时/失败、Quote年龄、EOD滞后、官方资讯积压、LLM抽取失败、候选数、拒单、数据库锁等待和worker心跳年龄；本地JSONL审计与可选通用Webhook共用脱敏事件，具备进程内冷却去重和失败投递降级。14:40失败、Quote/EOD异常、资讯失败/积压、锁超时及心跳缺失/过期均产生类型化告警；stale Quote贯穿保持`tradable=false`和零订单。
 
 ### M6：发布强化与规模决策
 
@@ -866,13 +884,13 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 | M2 策略内核与多策略基础 | 32 | 32 | 100% | `DONE` | 2026-08-18完成M2-E；140项测试、Golden防漂移、Strategy 100%覆盖率及真实数据副本两时段演练通过 |
 | M3 数据契约、血缘与LLM治理 | 30 | 30 | 100% | `DONE` | 2026-08-18完成M3-D；216项测试、风险抽取Trace、多实体门禁、Run→LLM血缘闭环及真实旧库副本v9升级通过 |
 | M4 Replay与策略实验 | 30 | 30 | 100% | `DONE` | 2026-08-18完成M4-D；293项测试、Experiment 100%/Simulator 96%覆盖，同Dataset比较、指标、Schema v10恢复及真实数据副本演练通过 |
-| M5 模块化、可观测性与质量门禁 | 10 | 32 | 31.25% | `IN_PROGRESS` | 2026-08-19完成M5-A；302项测试、85%总覆盖率、用例82%/Repository 91%，边界、两时段、原子发布和组合安全回归通过 |
+| M5 模块化、可观测性与质量门禁 | 24 | 32 | 75% | `IN_PROGRESS` | 2026-08-19完成M5-C；320项测试、86%总覆盖率、Observability 91%/UoW 100%，119项安全专项与36项迁移/运行专项通过 |
 | M6 发布强化与规模决策 | 0 | 18 | 0% | `NOT_STARTED` | — |
-| **总体** | **128** | **168** | **76.2%** | `IN_PROGRESS` | M0至M4完成，M5为10/32点；下一阶段M5-B |
+| **总体** | **142** | **168** | **84.5%** | `IN_PROGRESS` | M0至M4完成，M5为24/32点；下一阶段M5-D |
 
 ### 12.1 当前建议的下一工程阶段
 
-工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M1至M4及M5-A已经完成。当前建议下一阶段为M5-B“依赖组装与查询模型”，按M5-03 → M5-06完成共6点：先把M5-A仍暂存在Workflow Facade中的依赖构造集中到Composition Root，再让Dashboard只消费稳定只读查询模型；不提前实施结构化日志、指标告警或CI门禁。
+工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M1至M4及M5-A、M5-B、M5-C已经完成。当前建议下一阶段为M5-D“CI门禁与故障注入”，按M5-07 → M5-08完成共8点：先让覆盖率、类型、安全和依赖退化可阻断合并，再补齐数据源、锁、调度竞争、崩溃和恢复的自动化故障证据；不跨入M6发布重构。
 
 | 阶段ID | 阶段名称 | 工作包 | 点数 | 依赖 | 状态 | 阶段验收目标 |
 |---|---|---|---:|---|---|---|
@@ -893,8 +911,8 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 | M4-C | 历史成交模拟 | M4-04 | 5 | M4-B | `DONE` | 历史Simulator与实时影子成交隔离；费用、滑点、T+1、不可成交、现金和失败回滚可配置且可验证 |
 | M4-D | 实验记录与评估闭环 | M4-05、M4-06 | 10 | M4-C | `DONE` | 基线与候选策略在同一不可变数据集上比较；假设、指标、数据质量和结论可追溯且可复算 |
 | M5-A | 应用与持久化边界 | M5-01、M5-02 | 10 | M4 | `DONE` | Workflow拆为职责单一的应用用例；服务仅依赖最小Repository能力，并保持现有运行语义与事务边界 |
-| M5-B | 依赖组装与查询模型 | M5-03、M5-06 | 6 | M5-A | `NOT_STARTED` | Composition Root集中组装依赖；Dashboard只消费稳定只读查询模型，不自行拼接领域表语义 |
-| M5-C | 结构化可观测性 | M5-04、M5-05 | 8 | M5-B | `NOT_STARTED` | Job、Run、Strategy、Provider和阶段可通过关联ID串联；关键运行、数据、锁、LLM和组合异常可度量并告警 |
+| M5-B | 依赖组装与查询模型 | M5-03、M5-06 | 6 | M5-A | `DONE` | Composition Root集中组装依赖；Dashboard只消费稳定只读查询模型，不自行拼接领域表语义 |
+| M5-C | 结构化可观测性 | M5-04、M5-05 | 8 | M5-B | `DONE` | Job、Run、Strategy、Provider和阶段可通过关联ID串联；关键运行、数据、锁、LLM和组合异常可度量并告警 |
 | M5-D | CI门禁与故障注入 | M5-07、M5-08 | 8 | M5-C | `NOT_STARTED` | 覆盖率、类型、安全与依赖退化可阻断合并；数据源、锁、崩溃及恢复的关键失败路径具有自动化证据 |
 | M6-A | 原子发布与迁移预检 | M6-01、M6-02 | 8 | M5 | `NOT_STARTED` | Release构建和迁移在切换前完成兼容预检；失败不污染Active Release，不可安全回滚的变更被明确阻止或批准 |
 | M6-B | 恢复、供应链与规模决策 | M6-03、M6-04、M6-05、M6-06 | 10 | M6-A | `NOT_STARTED` | 备份可恢复且通过健康检查；Release来源可追踪；性能与锁基线为继续使用DuckDB或扩展架构提供证据化门槛 |
@@ -932,6 +950,10 @@ M6总点数：`18`。完成条件：发布环境可原子切换，并对是否�
 `M4-D`已完成，阶段验收证据为：M4-05以不可变Dataset、两臂完整Strategy Identity、类型化标准、自动判定和规范化Hash形成可审计Experiment Record；Schema v10持久化幂等且拒绝冲突改写，提交前故障不留下部分记录。M4-06统一计算分层收益、MFE/MAE、总回报、最大回撤、换手、候选/权益可评估率与拒单质量计数，缺失权益估值显式不可评估且不会发布部分指标。真实研究数据库只复制到临时文件，47,877条日线中3,192个代码满足完整窗口，同一内容寻址Dataset上的两组各5只候选完成比较，两个可评估率均100%、记录Hash回读一致、Schema升至v10；临时副本已删除，源库SHA-256未变化。Ruff、293项全量测试和pip check通过；Research含分支覆盖率84%，Experiment 100%、Simulator 96%，43项阶段专项以及迁移、Replay、原子发布、策略归属和组合安全回归通过。无依赖、实时运行、订单/成交/现金、调度、Provider、部署、README或领域语言变化；现有技术债状态不变。当前建议下一阶段为`M5-A`，顺序为M5-01 → M5-02，不提前实施Composition Root、Dashboard Query Model或可观测性。
 
 `M5-A`已完成，阶段验收证据为：M5-01将诊断、采集、两时段Signal、评价、Fill、持仓监控、Post-close和Job恢复拆成11个单一公开入口的应用用例，Workflow保留CLI/Scheduler兼容Facade与待M5-B迁移的临时组装；M5-02以七类Repository Protocol和显式DuckDB适配器限制Market、Research、Job、News、Portfolio、Evaluation与Report的持久化能力，四类领域服务不再导入或接收完整Database，Research Run UoW的单事务发布保持原样。新增架构与Fake测试先暴露缺少应用/Repository边界，随后覆盖租约丢失、Provider构造失败、日历确认、成交/监控窗口、评价、复盘和恢复。Ruff、302项全量测试和pip check通过；Research含分支覆盖率85%，应用用例82%、Repository 91%、Workflow Facade 86%；112项两时段、原子发布、时间边界、Provider、策略归属和组合安全阶段回归通过。无Schema、迁移、依赖、Provider契约、订单/成交/现金语义、调度、部署、README或领域语言变化；TD-010完成。当前建议下一阶段为`M5-B`，顺序为M5-03 → M5-06，不提前实施结构化可观测性或CI门禁。
+
+`M5-B`已完成，阶段验收证据为：M5-03把原Workflow中的Database、Repository、Provider、快照、Strategy、服务、UoW和用例构造迁入唯一Composition Root，Facade只负责兼容委派且保留全部显式注入和测试属性；M5-06建立类型化只读Dashboard Query Model，把Signal、持仓/Quote、交易、评估、运行健康、风险事件和报告语义封装为稳定投影，页面不再依赖Database或自由表名。测试先因缺少`bootstrap`和查询契约失败，随后空库、Published Signal、无Quote持仓、跨上下文投影、定向风险查询、文件Hash不变和Streamlit七标签烟雾通过。Ruff、309项全量测试和pip check通过；Research含分支覆盖率86%，Composition Root 92%、Query Model 100%，103项原子发布、时间边界、策略归属和组合安全专项通过。无Schema、迁移、依赖、Provider契约、订单/成交/现金语义、调度、部署、README或领域语言变化；技术债状态不变。当前建议下一阶段为`M5-C`，顺序为M5-04 → M5-05，不提前实施CI门禁或发布强化。
+
+`M5-C`已完成，阶段验收证据为：M5-04以类型化关联上下文、统一Observability Sink和既有Logger桥接输出脱敏单行JSON，Job、Run、Strategy、Provider、源码SHA、stage与information cutoff可串联；M5-05以类型化枚举记录Job、Provider、数据质量、资讯/LLM、候选/拒单、数据库锁和worker心跳指标，并把本地JSONL审计、进程内冷却去重与可选Webhook组合为不参与交易事务的告警通道。测试先因缺少`observability`模块失败，随后11项M5-C专项覆盖JSON解析/脱敏、显式注入兼容、Webhook Fake及失败降级、14:40失败、Quote/EOD、资讯失败/积压、锁超时、心跳缺失/过期、拒单和Pre-close关联贯穿；stale Quote保持`tradable=false`且零订单。Ruff、320项全量测试、pip check通过；Research含分支覆盖率86%，Observability 91%、UoW 100%，119项原子发布/时间边界/策略归属/组合安全专项和36项迁移/运行专项通过。无Schema、迁移、依赖、Provider数据契约、评分、订单/成交/现金语义或真实数据变化；README与环境样例记录可选告警配置，CONTEXT领域语言不变；TD-012完成。生产真实Webhook接收端、独立worker外部探针及JSONL轮转尚未演练，不影响阶段目标；下一阶段为`M5-D`，顺序M5-07 → M5-08，不跨入M6。
 
 ### 12.2 阶段级Goal执行规则
 
@@ -1181,6 +1203,8 @@ worker_heartbeat_age_seconds
 | 2026-08-18 | `704dd0762eb1`（工作区） | 完成M4-C：与实时影子账户隔离的确定性历史成交Simulator | M4-04完成；M4为20/30点；总体108/168点；技术债状态不变；下一阶段M4-D | Ruff、272项全量测试、Research/合并覆盖率83%/80%、Simulator 96%、23项阶段专项、86项安全回归和pip check通过；T+1、费用、滑点、不可成交、现金守恒及故障恢复验证通过 |
 | 2026-08-18 | `eb5801d9c5b3`（工作区） | 完成M4-D：不可变Experiment记录、Schema v10与信号/组合/数据质量指标闭环 | M4-05/06完成；M4为30/30点并完成；总体118/168点；技术债状态不变；下一阶段M5-A | Ruff、293项全量测试、Research含分支覆盖84%、Experiment 100%、Simulator 96%、43项阶段专项、Schema v10五类场景、事务恢复、同Dataset比较、真实数据副本演练和pip check通过 |
 | 2026-08-19 | `50deeadf773c`（工作区） | 完成M5-A：独立应用用例、最小Repository端口与DuckDB上下文适配器 | M5-01/02、TD-010完成；M5为10/32点；总体128/168点；下一阶段M5-B | Ruff、302项全量测试、Research含分支覆盖85%、用例82%、Repository 91%、112项两时段/原子发布/时间边界/Provider/归属/组合安全回归和pip check通过 |
+| 2026-08-19 | `5be4d10c5647`（工作区） | 完成M5-B：Composition Root、类型化Dashboard Query Model与只读投影 | M5-03/06完成；M5为16/32点；总体134/168点；下一阶段M5-C；技术债状态不变 | Ruff、309项全量测试、Research含分支覆盖86%、Composition Root 92%、Query Model 100%、Dashboard七标签烟雾、103项安全专项和pip check通过 |
+| 2026-08-19 | `5be4d10c5647`（工作区） | 完成M5-C：脱敏JSON关联日志、类型化指标、本地审计与可选Webhook告警 | M5-04/05、TD-012完成；M5为24/32点；总体142/168点；下一阶段M5-D | Ruff、320项全量测试、Research含分支覆盖86%、Observability 91%、UoW 100%、11项M5-C、119项安全专项、36项迁移/运行专项和pip check通过 |
 
 ---
 
@@ -1197,4 +1221,4 @@ KFCQuant当前不是混乱的脚本集合，而是边界意识较强、具备运
 5. M5降低模块耦合并建立主动观测；
 6. M6在真实指标证明需要时强化发布和扩展基础设施。
 
-M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3同样完成，市场与Run输入具备不可变快照和时间边界，风险事件还能继续定位Prompt、模型和输入Hash，多实体资讯不会再被压缩成单一`ts_code`。M4也已完成：Replay Clock、Manifest只读网关、实时/Replay共核、隔离历史Simulator和不可变Experiment/指标记录共同形成可审计实验闭环。M5-A进一步把Workflow行为拆成独立应用用例，并用最小Repository端口隔离服务与底层Database。下一步由M5-B集中依赖组装并建立Dashboard只读查询模型；结构化可观测性继续留在M5-C。
+M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3同样完成，市场与Run输入具备不可变快照和时间边界，风险事件还能继续定位Prompt、模型和输入Hash，多实体资讯不会再被压缩成单一`ts_code`。M4也已完成：Replay Clock、Manifest只读网关、实时/Replay共核、隔离历史Simulator和不可变Experiment/指标记录共同形成可审计实验闭环。M5-A把Workflow行为拆成独立应用用例并用最小Repository端口隔离服务与底层Database，M5-B进一步由Composition Root集中组装全部依赖，并让Dashboard只消费稳定只读投影；M5-C现已让Job、Run、Strategy、Provider和关键阶段具备脱敏关联日志、类型化指标及可选主动告警。下一步由M5-D把覆盖率、类型、安全、依赖和关键故障路径固化为CI门禁，不提前跨入M6。

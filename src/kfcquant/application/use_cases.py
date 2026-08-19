@@ -24,6 +24,7 @@ from kfcquant.market_data import (
     MarketTableSchema,
 )
 from kfcquant.models import ResearchRunState, RunStatus, SignalKind, SignalRun
+from kfcquant.observability import AlertCode, MetricName, Observability, get_observability
 from kfcquant.point_in_time import PointInTimeDataGateway
 from kfcquant.run_manifest import ResearchRunManifest, RunInputSnapshot
 from kfcquant.runtime import build_identity
@@ -43,14 +44,26 @@ def validated_market_frame(schema: MarketTableSchema, frame: pd.DataFrame) -> pd
 
 
 class JobController:
-    def __init__(self, repository: JobRepository, settings: Settings, clock: Clock):
+    def __init__(
+        self,
+        repository: JobRepository,
+        settings: Settings,
+        clock: Clock,
+        observability: Observability | None = None,
+    ):
         self.repository = repository
         self.settings = settings
         self.clock = clock
+        self.observability = observability or get_observability()
+        self._contexts: dict[str, Any] = {}
+        self._jobs: dict[str, tuple[str, datetime]] = {}
 
     def start(self, name: str, at: datetime) -> str:
         job_id = str(uuid4())
         self.repository.start_job(job_id, name, at, timedelta(seconds=self.settings.job_lease_seconds))
+        self._jobs[job_id] = (name, at)
+        self._contexts[job_id] = self.observability.begin_context(job_run_id=job_id, stage=name)
+        self.observability.event("job_started", job_name=name, started_at=at)
         return job_id
 
     def heartbeat(self, job_id: str) -> datetime:
@@ -67,6 +80,8 @@ class JobController:
     def finish(self, job_id: str, status: str, message: str, **metadata: Any) -> None:
         finished_at = self.heartbeat(job_id)
         self.repository.finish_job(job_id, finished_at, status, message, metadata)
+        job_name, started = self._jobs.get(job_id, ("unknown", finished_at))
+        self._record_completion(job_id, job_name, started, finished_at, status, message, metadata)
 
     def completion(
         self,
@@ -77,15 +92,69 @@ class JobController:
         message: str,
         **metadata: Any,
     ) -> JobCompletion:
-        return JobCompletion(
+        finished_at = self.heartbeat(job_id)
+        completion = JobCompletion(
             job_run_id=job_id,
             job_name=name,
             started_at=started,
-            finished_at=self.heartbeat(job_id),
+            finished_at=finished_at,
             status=status,
             message=message,
             metadata=metadata,
         )
+        self._close_context(job_id)
+        return completion
+
+    def _record_completion(
+        self,
+        job_id: str,
+        name: str,
+        started: datetime,
+        finished_at: datetime,
+        status: str,
+        message: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        duration = max(0.0, (finished_at - started).total_seconds())
+        self.observability.metric(
+            MetricName.JOB_DURATION_SECONDS,
+            duration,
+            unit="seconds",
+            labels={"job_name": name, "status": status},
+        )
+        status_metrics = {
+            "success": MetricName.JOB_SUCCESS_TOTAL,
+            "failed": MetricName.JOB_FAILED_TOTAL,
+            "missed": MetricName.JOB_MISSED_TOTAL,
+        }
+        if metric := status_metrics.get(status):
+            self.observability.metric(metric, 1, labels={"job_name": name})
+        self.observability.event(
+            "job_finished",
+            severity="error" if status == "failed" else "info",
+            job_name=name,
+            status=status,
+            duration_seconds=duration,
+            message=message,
+            metadata=metadata,
+        )
+        if (
+            name == "run-preclose"
+            and status == "failed"
+            and self.settings.schedule.preclose_window.contains(started)
+        ):
+            self.observability.alert(
+                AlertCode.PRECLOSE_RUN_FAILED,
+                "scheduled pre-close Signal Run failed",
+                dedup_key=started.date().isoformat(),
+            )
+        self._close_context(job_id)
+
+    def _close_context(self, job_id: str) -> None:
+        token = self._contexts.pop(job_id, None)
+        self._jobs.pop(job_id, None)
+        if token is not None:
+            self.observability.end_context(token)
 
 
 class MarketBatchIngestor:
@@ -382,6 +451,7 @@ class RunPrecloseUseCase:
         manifests: RunManifestFactory,
         jobs: JobController,
         clock: Clock,
+        observability: Observability | None = None,
     ):
         self.settings = settings
         self.repository = repository
@@ -396,6 +466,7 @@ class RunPrecloseUseCase:
         self.manifests = manifests
         self.jobs = jobs
         self.clock = clock
+        self.observability = observability or get_observability()
 
     def execute(self, as_of: datetime | None = None, research_outside_window: bool = False) -> SignalRun:
         as_of = as_of or self.clock.now()
@@ -446,6 +517,28 @@ class RunPrecloseUseCase:
             data_fresh = not quotes.empty and bool(
                 ((as_of_utc - quote_times).abs().dt.total_seconds() <= self.settings.quote_freshness_seconds).all()
             )
+            if not data_fresh:
+                self.observability.alert(
+                    AlertCode.QUOTE_DATA_STALE,
+                    "pre-close live quote batch is missing or stale",
+                    dedup_key=as_of.date().isoformat(),
+                    signal_run_id=draft.run_id,
+                    strategy_id=strategy.identity.strategy_id,
+                    strategy_version=strategy.identity.version,
+                    information_cutoff=as_of,
+                    stage="preclose.quote-quality",
+                )
+            if not quote_times.empty:
+                self.observability.metric(
+                    MetricName.QUOTE_AGE_SECONDS,
+                    float((as_of_utc - quote_times.max()).total_seconds()),
+                    unit="seconds",
+                    signal_run_id=draft.run_id,
+                    strategy_id=strategy.identity.strategy_id,
+                    strategy_version=strategy.identity.version,
+                    information_cutoff=as_of,
+                    stage="preclose.quote-quality",
+                )
             news_fetch_start = datetime.combine((as_of - timedelta(days=10)).date(), time(0), tzinfo=SHANGHAI_TZ)
             news = self.news.sync(news_fetch_start, as_of)
             self.jobs.heartbeat(job_id)
@@ -453,6 +546,28 @@ class RunPrecloseUseCase:
             expected_eod = self.repository.previous_trading_day(as_of.date())
             latest_eod = pd.to_datetime(bars["trade_date"], errors="coerce").max() if not bars.empty else pd.NaT
             eod_fresh = bool(expected_eod and not pd.isna(latest_eod) and latest_eod.date() == expected_eod)
+            if not eod_fresh:
+                self.observability.alert(
+                    AlertCode.EOD_DATA_STALE,
+                    "official EOD data is not current for the pre-close Signal Run",
+                    dedup_key=as_of.date().isoformat(),
+                    signal_run_id=draft.run_id,
+                    strategy_id=strategy.identity.strategy_id,
+                    strategy_version=strategy.identity.version,
+                    information_cutoff=as_of,
+                    stage="preclose.eod-quality",
+                )
+            if not pd.isna(latest_eod):
+                self.observability.metric(
+                    MetricName.LATEST_EOD_LAG_DAYS,
+                    (as_of.date() - latest_eod.date()).days,
+                    unit="days",
+                    signal_run_id=draft.run_id,
+                    strategy_id=strategy.identity.strategy_id,
+                    strategy_version=strategy.identity.version,
+                    information_cutoff=as_of,
+                    stage="preclose.eod-quality",
+                )
             risk_start_date = self.repository.trading_day_lookback(
                 as_of.date(), self.settings.news_lookback_trading_days
             ) or (as_of.date() - timedelta(days=10))
@@ -518,6 +633,16 @@ class RunPrecloseUseCase:
                     },
                 }
             ).transition_to(ResearchRunState.STAGED).transition_to(ResearchRunState.PUBLISHED)
+            self.observability.metric(
+                MetricName.CANDIDATE_COUNT,
+                run.candidate_count,
+                labels={"signal_kind": run.signal_kind.value},
+                signal_run_id=run.run_id,
+                strategy_id=run.strategy_id,
+                strategy_version=run.strategy_version,
+                information_cutoff=run.information_cutoff,
+                stage="preclose.strategy-result",
+            )
             orders = self.portfolio.plan_candidate_orders(run, scored.candidates)
             manifest = self.manifests.create(run, point_in_time.snapshots, execution.result_sha256)
             self.run_uow.commit(
@@ -576,6 +701,7 @@ class RunMorningUseCase:
         manifests: RunManifestFactory,
         jobs: JobController,
         clock: Clock,
+        observability: Observability | None = None,
     ):
         self.settings = settings
         self.repository = repository
@@ -587,6 +713,7 @@ class RunMorningUseCase:
         self.manifests = manifests
         self.jobs = jobs
         self.clock = clock
+        self.observability = observability or get_observability()
 
     def execute(self, as_of: datetime | None = None, research_outside_window: bool = False) -> SignalRun:
         as_of = as_of or self.clock.now()
@@ -642,6 +769,28 @@ class RunMorningUseCase:
             expected_eod = self.repository.previous_trading_day(as_of.date())
             latest_eod = pd.to_datetime(bars["trade_date"], errors="coerce").max() if not bars.empty else pd.NaT
             eod_fresh = bool(expected_eod and not pd.isna(latest_eod) and latest_eod.date() == expected_eod)
+            if not eod_fresh:
+                self.observability.alert(
+                    AlertCode.EOD_DATA_STALE,
+                    "official EOD data is not current for the morning Signal Run",
+                    dedup_key=as_of.date().isoformat(),
+                    signal_run_id=draft.run_id,
+                    strategy_id=strategy.identity.strategy_id,
+                    strategy_version=strategy.identity.version,
+                    information_cutoff=as_of,
+                    stage="morning.eod-quality",
+                )
+            if not pd.isna(latest_eod):
+                self.observability.metric(
+                    MetricName.LATEST_EOD_LAG_DAYS,
+                    (as_of.date() - latest_eod.date()).days,
+                    unit="days",
+                    signal_run_id=draft.run_id,
+                    strategy_id=strategy.identity.strategy_id,
+                    strategy_version=strategy.identity.version,
+                    information_cutoff=as_of,
+                    stage="morning.eod-quality",
+                )
             risk_start_date = self.repository.trading_day_lookback(
                 as_of.date(), self.settings.news_lookback_trading_days
             )
@@ -691,6 +840,16 @@ class RunMorningUseCase:
                     },
                 }
             ).transition_to(ResearchRunState.STAGED).transition_to(ResearchRunState.PUBLISHED)
+            self.observability.metric(
+                MetricName.CANDIDATE_COUNT,
+                run.candidate_count,
+                labels={"signal_kind": run.signal_kind.value},
+                signal_run_id=run.run_id,
+                strategy_id=run.strategy_id,
+                strategy_version=run.strategy_version,
+                information_cutoff=run.information_cutoff,
+                stage="morning.strategy-result",
+            )
             self.run_uow.commit(
                 run,
                 scored.candidates,

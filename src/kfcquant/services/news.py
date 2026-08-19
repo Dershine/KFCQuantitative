@@ -12,6 +12,7 @@ from kfcquant.models import (
     NewsDocument,
     RiskExtractionResult,
 )
+from kfcquant.observability import AlertCode, MetricName, Observability, get_observability
 from kfcquant.providers.document_loader import DocumentLoader
 
 RISK_KEYWORDS = (
@@ -76,11 +77,15 @@ class NewsService:
         provider: NewsProvider,
         llm: LLMProvider | None,
         loader: DocumentLoader,
+        observability: Observability | None = None,
+        official_news_backlog_threshold: int = 100,
     ):
         self.repository = repository
         self.provider = provider
         self.llm = llm
         self.loader = loader
+        self.observability = observability or get_observability()
+        self.official_news_backlog_threshold = official_news_backlog_threshold
 
     def _map_entities(self, documents: list[NewsDocument]) -> None:
         securities = self.repository.get_securities()
@@ -135,6 +140,13 @@ class NewsService:
         except Exception as exc:
             official_healthy = False
             messages.append(f"官方公告接口失败: {exc}")
+            self.observability.alert(
+                AlertCode.OFFICIAL_NEWS_UNHEALTHY,
+                "official news provider request failed",
+                dedup_key=end.date().isoformat(),
+                provider=str(getattr(self.provider, "source_name", type(self.provider).__name__)),
+                stage="news.sync",
+            )
         try:
             documents.extend(self.provider.fetch_mainstream_documents(start, end))
         except Exception as exc:
@@ -194,8 +206,36 @@ class NewsService:
                     exc.trace.call_id,
                     exc.trace.error_type,
                 )
+                self.observability.metric(
+                    MetricName.LLM_EXTRACTION_FAILURE_TOTAL,
+                    1,
+                    labels={"error_type": exc.trace.error_type or "unknown"},
+                    provider=str(getattr(self.llm, "source_name", type(self.llm).__name__)),
+                    stage="news.extract-risk",
+                )
                 failed += 1
             except Exception as exc:
                 self.repository.mark_document(document.document_id, "failed", error=str(exc)[:1000])
+                self.observability.metric(
+                    MetricName.LLM_EXTRACTION_FAILURE_TOTAL,
+                    1,
+                    labels={"error_type": type(exc).__name__},
+                    provider=str(getattr(self.llm, "source_name", type(self.llm).__name__)) if self.llm else "none",
+                    stage="news.extract-risk",
+                )
                 failed += 1
+        pending = self.repository.pending_news_documents(limit=self.official_news_backlog_threshold + 1)
+        official_pending = sum(str(item.source_tier.value) == "official" for item in pending)
+        self.observability.metric(
+            MetricName.OFFICIAL_NEWS_PENDING,
+            official_pending,
+            stage="news.backlog",
+        )
+        if official_pending >= self.official_news_backlog_threshold:
+            self.observability.alert(
+                AlertCode.OFFICIAL_NEWS_BACKLOG,
+                "official news processing backlog exceeded the configured threshold",
+                dedup_key="official-news",
+                stage="news.backlog",
+            )
         return processed, failed

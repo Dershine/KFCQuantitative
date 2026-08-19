@@ -19,6 +19,7 @@ from kfcquant.models import (
     SignalKind,
     SignalRun,
 )
+from kfcquant.observability import MetricName, Observability, get_observability
 
 
 class FeeModel:
@@ -97,11 +98,28 @@ class FeeModel:
 
 
 class PortfolioService:
-    def __init__(self, repository: PortfolioRepository, settings: Settings, live_provider: LiveQuoteProvider):
+    def __init__(
+        self,
+        repository: PortfolioRepository,
+        settings: Settings,
+        live_provider: LiveQuoteProvider,
+        observability: Observability | None = None,
+    ):
         self.repository = repository
         self.settings = settings
         self.live_provider = live_provider
         self.fees = FeeModel(settings)
+        self.observability = observability or get_observability()
+
+    def _reject_order(self, order_id: str, reason: str, reason_code: str, run_id: str) -> None:
+        self.repository.reject_order(order_id, reason)
+        self.observability.metric(
+            MetricName.ORDER_REJECTION_TOTAL,
+            1,
+            labels={"reason": reason_code},
+            signal_run_id=run_id,
+            stage="portfolio.capture-fill",
+        )
 
     def plan_candidate_orders(self, run: SignalRun, candidates: list[CandidateScore]) -> list[PaperOrder]:
         if not run.tradable:
@@ -153,53 +171,74 @@ class PortfolioService:
         for order_row in orders.to_dict("records"):
             open_positions = self.repository.get_open_positions()
             if len(open_positions) >= self.settings.max_positions:
-                self.repository.reject_order(str(order_row["order_id"]), "组合已满")
+                self._reject_order(str(order_row["order_id"]), "组合已满", "portfolio_full", run_id)
                 continue
             code = str(order_row["ts_code"])
             if not open_positions.empty and code in set(open_positions["ts_code"].astype(str)):
-                self.repository.reject_order(str(order_row["order_id"]), "已有持仓，V1禁止加仓")
+                self._reject_order(
+                    str(order_row["order_id"]),
+                    "已有持仓，V1禁止加仓",
+                    "position_already_open",
+                    run_id,
+                )
                 continue
             current = current_map.get(code)
             if current is None:
-                self.repository.reject_order(
+                self._reject_order(
                     str(order_row["order_id"]),
                     f"{self.settings.schedule.fill_at.strftime('%H:%M')}无实时行情",
+                    "missing_quote",
+                    run_id,
                 )
                 continue
             signal_quote = self.repository.get_quote_near(code, pd.Timestamp(order_row["created_at"]).to_pydatetime())
             if signal_quote is None:
-                self.repository.reject_order(
+                self._reject_order(
                     str(order_row["order_id"]),
                     f"缺少{self.settings.schedule.preclose_run_at.strftime('%H:%M')}基准快照",
+                    "missing_signal_quote",
+                    run_id,
                 )
                 continue
             delta_volume = float(current["volume"]) - float(signal_quote["volume"])
             delta_amount = float(current["amount"]) - float(signal_quote["amount"])
             if delta_volume <= 0 or delta_amount <= 0:
-                self.repository.reject_order(
+                self._reject_order(
                     str(order_row["order_id"]),
                     f"{self.settings.schedule.preclose_run_at.strftime('%H:%M')}至"
                     f"{self.settings.schedule.fill_at.strftime('%H:%M')}无可验证成交",
+                    "unverifiable_interval_trade",
+                    run_id,
                 )
                 continue
             raw_vwap = delta_amount / delta_volume
             pre_close = float(current["pre_close"])
             theoretical_up = round(pre_close * 1.10 + 1e-8, 2)
             if float(current["price"]) >= theoretical_up * (1 - self.settings.limit_distance_fraction):
-                self.repository.reject_order(str(order_row["order_id"]), "接近涨停，视为无法合理成交")
+                self._reject_order(
+                    str(order_row["order_id"]),
+                    "接近涨停，视为无法合理成交",
+                    "near_limit_up",
+                    run_id,
+                )
                 continue
             target_value = min(float(order_row["target_value"]), self.repository.get_cash())
             estimated_price = raw_vwap * (1 + self.settings.slippage_rate)
             shares = math.floor(target_value / estimated_price / self.settings.lot_size) * self.settings.lot_size
             order = PaperOrder.model_validate(order_row)
             if shares < self.settings.lot_size:
-                self.repository.reject_order(order.order_id, "资金不足一手")
+                self._reject_order(order.order_id, "资金不足一手", "insufficient_cash_for_lot", run_id)
                 continue
             fill, position = self.fees.buy_fill(raw_vwap, shares, at, order)
             if -fill.total_cash_change > self.repository.get_cash():
                 shares -= self.settings.lot_size
                 if shares < self.settings.lot_size:
-                    self.repository.reject_order(order.order_id, "计入费用后资金不足")
+                    self._reject_order(
+                        order.order_id,
+                        "计入费用后资金不足",
+                        "insufficient_cash_after_fees",
+                        run_id,
+                    )
                     continue
                 fill, position = self.fees.buy_fill(raw_vwap, shares, at, order)
             self.repository.apply_buy_fill(fill, position)

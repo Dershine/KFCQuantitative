@@ -6,11 +6,13 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import duckdb
 import pandas as pd
 from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
 
 from kfcquant.application.errors import JobAlreadyRunningError, JobLeaseLostError
 from kfcquant.experiments import ExperimentRecord
@@ -36,6 +38,7 @@ from kfcquant.models import (
     SignalRun,
     StrategyAttribution,
 )
+from kfcquant.observability import AlertCode, MetricName, Observability, get_observability
 from kfcquant.run_manifest import ResearchRunManifest
 from kfcquant.strategy_identity import StrategyParameterSnapshot, canonical_parameter_json, parameter_hash
 
@@ -455,6 +458,7 @@ class Database:
         initial_cash: float = 100_000.0,
         lock_timeout_seconds: int = 30,
         lock_path: str | Path | None = None,
+        observability: Observability | None = None,
     ):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -464,15 +468,44 @@ class Database:
         resolved_lock.touch(exist_ok=True)
         resolved_lock.chmod(0o666)
         self.lock = FileLock(resolved_lock, timeout=lock_timeout_seconds)
+        self.observability = observability or get_observability()
 
     @contextmanager
     def connect(self, read_only: bool = False) -> Iterator[duckdb.DuckDBPyConnection]:
-        with self.lock:
+        timer = perf_counter()
+        try:
+            self.lock.acquire()
+        except FileLockTimeout:
+            waited = max(0.0, perf_counter() - timer)
+            self.observability.metric(
+                MetricName.DATABASE_LOCK_WAIT_SECONDS,
+                waited,
+                unit="seconds",
+                labels={"read_only": read_only, "outcome": "timeout"},
+                stage="database.lock",
+            )
+            self.observability.alert(
+                AlertCode.DATABASE_LOCK_TIMEOUT,
+                "database file lock acquisition timed out",
+                dedup_key=str(self.path),
+                stage="database.lock",
+            )
+            raise
+        self.observability.metric(
+            MetricName.DATABASE_LOCK_WAIT_SECONDS,
+            max(0.0, perf_counter() - timer),
+            unit="seconds",
+            labels={"read_only": read_only, "outcome": "acquired"},
+            stage="database.lock",
+        )
+        try:
             connection = duckdb.connect(str(self.path), read_only=read_only)
             try:
                 yield connection
             finally:
                 connection.close()
+        finally:
+            self.lock.release()
 
     def initialize(self) -> None:
         with self.connect() as connection:

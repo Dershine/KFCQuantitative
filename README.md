@@ -145,6 +145,20 @@ BaoStock按股票读取整个历史区间并分批写入DuckDB和Parquet。首�
 
 每个研究任务都会持有默认15分钟的数据库租约，并在关键处理阶段续租。同名任务的有效租约会拒绝竞争启动；worker异常退出后，Scheduler下次启动会把过期任务标记为失败并允许安全重跑。Operations只让有效租约阻止部署，无法验证租约Schema或缺少租约的旧任务仍按失败关闭处理。可通过`KFCQUANT_JOB_LEASE_SECONDS`调整租约，但不应低于单次Provider阻塞调用的最大预期时间。
 
+CLI、Scheduler和既有应用日志使用单行JSON输出，并统一携带可用的`job_run_id`、`signal_run_id`、Strategy身份、Provider、阶段、源码SHA和information cutoff。Bearer Token、密钥字段及URL中的敏感查询参数会在输出前脱敏。运行指标与告警审计分别追加到`runtime/observability-metrics.jsonl`和`runtime/observability-alerts.jsonl`；它们不进入研究数据库，也不参与订单事务。
+
+系统会记录Job耗时/终态、Provider耗时/失败、Quote年龄、EOD滞后、官方资讯积压、LLM抽取失败、候选数、拒单、数据库锁等待和worker心跳年龄。14:40任务失败、官方资讯异常、锁超时和worker心跳异常会生成带冷却去重的告警。默认只保留本地审计；如需主动通知，可配置通用JSON Webhook：
+
+```dotenv
+KFCQUANT_ALERT_WEBHOOK_URL=https://你的告警接收端/kfcquant
+KFCQUANT_ALERT_WEBHOOK_BEARER_TOKEN=可选Bearer令牌
+KFCQUANT_ALERT_COOLDOWN_SECONDS=900
+KFCQUANT_WORKER_HEARTBEAT_STALE_SECONDS=180
+KFCQUANT_OFFICIAL_NEWS_BACKLOG_THRESHOLD=100
+```
+
+Webhook投递失败不会改变Research Run、订单或成交结果，但会写入结构化`alert_delivery_failed`事件。worker进程无法在自身完全停止后继续发信，因此生产环境仍应由Operations健康探针或外部服务定期执行`kfcquant health --json`；该检查会度量心跳年龄并分发已配置告警。
+
 - 交易时段每5分钟：检查已有持仓退出；
 - 08:00：确认交易日历；
 - 08:30：生成盘前观察名单；

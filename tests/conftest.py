@@ -24,6 +24,8 @@ def settings(tmp_path):
         database_path=tmp_path / "test.duckdb",
         raw_data_dir=tmp_path / "raw",
         report_dir=tmp_path / "reports",
+        runtime_dir=tmp_path / "runtime",
+        backup_dir=tmp_path / "backups",
         initial_cash=100_000,
         min_listing_trading_days=120,
         min_median_amount_20d=100_000_000,

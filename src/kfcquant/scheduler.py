@@ -7,19 +7,26 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from kfcquant.config import SHANGHAI_TZ, Settings
-from kfcquant.runtime import write_heartbeat
+from kfcquant.observability import configure_observability
+from kfcquant.runtime import heartbeat_path, observe_worker_heartbeat, write_heartbeat
 from kfcquant.services.workflow import Workflow
 
 LOGGER = logging.getLogger(__name__)
 
 
 def run_scheduler(settings: Settings) -> None:
+    observability = configure_observability(settings)
     workflow = Workflow(settings)
     recovered = workflow.recover_expired_jobs()
     if recovered:
         LOGGER.warning("recovered expired jobs at scheduler startup job_run_ids=%s", ",".join(recovered))
     scheduler = BlockingScheduler(timezone=SHANGHAI_TZ, job_defaults={"coalesce": False, "max_instances": 1})
     schedule = settings.schedule
+
+    def heartbeat() -> None:
+        if heartbeat_path(settings).exists():
+            observe_worker_heartbeat(settings, observability)
+        write_heartbeat(settings)
 
     def sync_eod() -> None:
         today = datetime.now(SHANGHAI_TZ).date()
@@ -55,7 +62,7 @@ def run_scheduler(settings: Settings) -> None:
     )
     jobs.append(
         (
-            lambda: write_heartbeat(settings),
+            heartbeat,
             CronTrigger(minute=f"*/{schedule.heartbeat_interval_minutes}", timezone=SHANGHAI_TZ),
             "heartbeat",
         )

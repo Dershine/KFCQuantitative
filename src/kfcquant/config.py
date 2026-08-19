@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     job_lease_seconds: int = Field(default=900, ge=60, le=86_400)
     database_read_only: bool = False
     base_url_path: str = ""
+    alert_webhook_url: str | None = None
+    alert_webhook_bearer_token: str | None = None
+    alert_cooldown_seconds: int = Field(default=900, ge=0, le=86_400)
+    worker_heartbeat_stale_seconds: int = Field(default=180, ge=60, le=3_600)
+    official_news_backlog_threshold: int = Field(default=100, ge=1, le=100_000)
 
     data_profile: Literal["learning"] = "learning"
     market_provider: Literal["baostock", "tushare"] = "baostock"
@@ -93,6 +98,10 @@ class Settings(BaseSettings):
             raise ValueError("TUSHARE_TOKEN is required when a Tushare provider is selected")
         if not self.news_sources:
             raise ValueError("news_sources must not be empty")
+        if self.alert_webhook_url and not self.alert_webhook_url.startswith(("https://", "http://")):
+            raise ValueError("alert_webhook_url must use http or https")
+        if self.alert_webhook_bearer_token and not self.alert_webhook_url:
+            raise ValueError("alert_webhook_url is required when alert_webhook_bearer_token is configured")
         return self
 
     @property
@@ -103,6 +112,14 @@ class Settings(BaseSettings):
     @property
     def dashscope_base_url(self) -> str:
         return self.llm_base_url
+
+    @property
+    def metrics_path(self) -> Path:
+        return self.runtime_dir / "observability-metrics.jsonl"
+
+    @property
+    def alerts_path(self) -> Path:
+        return self.runtime_dir / "observability-alerts.jsonl"
 
     def ensure_directories(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
