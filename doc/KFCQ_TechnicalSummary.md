@@ -10,7 +10,7 @@
 | 首次建立 | 2026-08-15 |
 | 最近复核 | 2026-08-20 |
 | 项目版本基线 | `0.2.0` |
-| 源码基线 | `1d806e2`（OPS-A候选源码已提交、推送且CI通过；生产Active Release仍为`228f34f`，等待保护窗口后的正式发布） |
+| 源码基线 | `edea5d6`（OPS-A候选源码已提交、推送且CI通过；生产Active Release仍为`228f34f`，等待保护窗口后的正式发布） |
 | 适用范围 | Research Service、Operations Manager、数据与部署基础设施 |
 | 目标读者 | 项目维护者、策略开发者、代码审查者、部署维护者 |
 | 领域语言 | 以根目录 `CONTEXT.md` 为准 |
@@ -422,7 +422,7 @@ flowchart TD
 |---|---|
 | Ruff | 通过 |
 | Pytest | 368项通过；1项Linux目录符号链接测试在Windows不适用而跳过 |
-| 总覆盖率 | 85.09%（Research与Operations合并且含分支；CI下限84%） |
+| 总覆盖率 | 85.13%（Research与Operations合并且含分支；CI下限84%） |
 | `observability.py` | 91%（含分支） |
 | `assurance.py`、`kfcops/cli.py` | 94% / 97%（含分支） |
 | `supply_chain.py` | 82%（含分支；关键secret、来源Hash及篡改分支已覆盖） |
@@ -544,7 +544,7 @@ flowchart TD
 | TD-015 | MEDIUM | LLM Prompt与响应曾缺少完整版本和追踪元数据 | 风险事件已关联Prompt/Input/Response Hash、模型、耗时和失败元数据 | M3 | `DONE` |
 | TD-016 | LOW | Python要求曾存在3.12/3.13口径差异 | 合法环境可能被doctor误判 | M1 | `DONE` |
 | TD-017 | LOW | CI曾缺少覆盖率门槛、类型检查和依赖安全检查 | 现由84%合并分支覆盖率、核心契约mypy、Bandit高严重度扫描和生产锁文件漏洞审计阻断退化 | M5 | `DONE` |
-| TD-018 | HIGH | wheel安装后的运行时曾从`site-packages`推导仓库根，导致依赖锁Hash显示为`unavailable` | `1d806e2`候选已让Release环境显式携带并校验锁Hash，且完整性检查拒绝环境值漂移；本地质量门禁与GitHub CI已通过，尚待保护窗口后的Ubuntu Active Release发布验收 | OPS-A | `IN_PROGRESS` |
+| TD-018 | HIGH | wheel安装后的运行时曾从`site-packages`推导仓库根，导致依赖锁Hash显示为`unavailable` | `edea5d6`候选已让Release环境显式携带并校验锁Hash，且完整性检查拒绝环境值漂移；本地质量门禁与GitHub CI已通过，尚待保护窗口后的Ubuntu Active Release发布验收 | OPS-A | `IN_PROGRESS` |
 
 技术债状态更新必须附带以下之一：
 
@@ -913,7 +913,7 @@ M6进度：`18 / 18 = 100%`。完成条件已满足：M6-A提供原子Release与
 | M6 发布强化与规模决策 | 18 | 18 | 100% | `DONE` | 2026-08-19完成M6-B；隔离恢复、Release来源、secret门禁、性能/锁基线和扩展决策通过 |
 | **总体** | **168** | **168** | **100%** | `DONE` | M0至M6全部完成；下一步为生产证据积累，不立即扩展架构 |
 
-OPS-A是独立运行证据阶段，不并入上述168点架构路线。当前已验收点数为`0/10`：三个工作包均已有真实产物；Research密钥与提交、推送、部署授权已满足，`1d806e2`不可变候选已通过本地门禁与GitHub CI并安排在交易保护窗口结束后发布。正式Active Release在验收前仍为`228f34f`，因此OPS-01尚未DONE，OPS-02受其依赖约束尚不能计点；OPS-03的锁与查询门槛虽已满足，仍必须继续等待真实14:40 Job，不能提前计点。
+OPS-A是独立运行证据阶段，不并入上述168点架构路线。当前已验收点数为`0/10`：三个工作包均已有真实产物；Research密钥与提交、推送、部署授权已满足，`edea5d6`不可变候选已通过本地门禁与GitHub CI并安排在交易保护窗口结束后发布。正式Active Release在验收前仍为`228f34f`，因此OPS-01尚未DONE，OPS-02受其依赖约束尚不能计点；OPS-03的锁与查询门槛虽已满足，仍必须继续等待20个成功或降级完成的真实14:40 Job，不能提前计点。
 
 ### 12.1 当前建议的下一工程阶段
 
@@ -931,11 +931,11 @@ OPS-A的Definition of Ready还要求：服务器被明确授权作为KFCQuant专
 
 OPS-A最近证据（2026-08-20）：
 
-- OPS-01：`43.136.108.53`已从受审`228f34f`建立独立Release/venv和`current`链接；Ubuntu 24.04、Python 3.12.3、Nginx、worker、web、ops与assurance timer均健康，裸IP入口使用IP SAN自签名TLS与Basic Auth，证书私钥和初始凭据权限分别为`640 root:kfcquant`与`600 root:root`。外部HTTPS无凭据返回401，Research/Ops内部健康返回200。真实wheel运行发现依赖锁Hash为`unavailable`后，`5251fc1`、`9cfa545`、`19c045e`和`85ab83f`依次补齐显式Release环境、不可变venv路径、隔离Git环境以及共享锁/健康输出契约；`1d806e2`再修复真实晨间任务暴露的可空资讯投影，属于本阶段不可分割的运行前置。候选在本地通过Ruff、368项全量测试、85.09%合并分支覆盖率、mypy、Bandit、secret扫描、pip-audit及pip check，GitHub Actions运行`32330394179`的测试与打包均通过。服务器持有受审bundle `/var/lib/kfcops/incoming-1d.bundle`，SHA-256为`522cc671d38fe324efc9de3cc47426c28d2f1a5948078d790ea1d7785361bcbb`、权限`640 kfcops:kfcquant`；生产契约预检、共享锁访问和health JSON解析均通过。2026-08-20 12:13复核确认Active Release仍为`228f34f`、五项服务/定时器均active，并由transient systemd timer安排`1d806e2`在15:15保护窗口结束后执行正式部署。本包保持IN_PROGRESS，只有原子切换、备份/迁移、依赖锁Hash、服务健康及失败回滚点全部验收后才能DONE。
+- OPS-01：`43.136.108.53`已从受审`228f34f`建立独立Release/venv和`current`链接；Ubuntu 24.04、Python 3.12.3、Nginx、worker、web、ops与assurance timer均健康，裸IP入口使用IP SAN自签名TLS与Basic Auth，证书私钥和初始凭据权限分别为`640 root:kfcquant`与`600 root:root`。外部`/ops/`无凭据返回401，Research/Ops内部健康返回200。真实wheel运行发现依赖锁Hash为`unavailable`后，`5251fc1`、`9cfa545`、`19c045e`和`85ab83f`依次补齐显式Release环境、不可变venv路径、隔离Git环境以及共享锁/健康输出契约；`1d806e2`修复真实晨间任务暴露的可空资讯投影，`edea5d6`再让失败或错过的Job不能满足容量门槛，两项均为本阶段不可分割的运行前置。最新候选在本地通过Ruff、368项全量测试、85.13%合并分支覆盖率、mypy、Bandit、secret扫描、pip-audit及pip check，GitHub Actions运行`32332088735`的测试与打包均通过。服务器持有受审bundle `/var/lib/kfcops/incoming-edea.bundle`，SHA-256为`f46243fdb363c55aafb84c22442d83a963bd185f339bbdeb12e8aee5a251005f`、权限`640 kfcops:kfcquant`；服务器Git仓库已验证完整历史、目标对象、干净状态和`deployable=true`。2026-08-20 12:36复核确认Active Release仍为`228f34f`，资源余量、入口/内部健康和锁状态正常，并由transient systemd timer安排`edea5d6`在15:15保护窗口结束后执行正式部署；旧`1d806e2` timer已停止。本包保持IN_PROGRESS，只有原子切换、备份/迁移、依赖锁Hash、服务健康及失败回滚点全部验收后才能DONE。
 - OPS-02：引导后正式备份与首次timer/故障演练通过；完成历史初始化后又由同一正式部署备份实现生成`20260819165446-228f34f847ae.duckdb`，其SHA-256在创建时与正式库均为`4d27c8f566d2f693feea842566c5a834281d1e92e5f7d62dba8e8ae7cd217d74`；正式库随后由正常Scheduler继续写入，不能再用旧Hash声称当前相等。已安装timer真实触发成功并恢复到每周日03:30加随机延迟的计划；最新成功报告`20260819T085457943422Z-3a57ce123c3f41528d64ac21252fa6cf.json`验证隔离副本Hash相同、DuckDB只读打开、Schema v10及核心表健康，耗时0.119秒。坏备份注入报告以退出码1和DuckDB `IOException`失败关闭；正式库、好备份、Active Release和四个服务保持不变，测试文件与timer覆盖均已清理。DoD证据本身已通过，但在OPS-01依赖完成前保持IN_PROGRESS；正式发布后还须复核新备份、Active与服务状态未受失败发布污染。
-- OPS-03：正式`sync-calendar`确认交易日并写入21行，随后受90分钟systemd上限保护的初始`sync-eod`在2,243秒内成功同步5,547只证券、122个交易日和386,599条日线，共生成35个采集批次；连同前序日历批次，36份Parquet逐一重算Hash全部通过，数据库为Schema v10且行数匹配。容量报告`20260819T085530463632Z-9bf4de6d92f54e36a154b3f740d7f715.json`包含103个成功锁样本和三类查询各20次，锁P95为0.000377秒，查询P95最大0.001085秒，恢复RTO为0.119秒，无无效指标行；截至2026-08-20 11:45，正常服务已累计5,402个成功锁样本，但真实14:40 `run-preclose`仍为0。当天08:30真实`run-morning`在读取1,366条待处理资讯时因SQL NULL与VARCHAR投影产生的Pandas NaN触发Pydantic失败关闭，其中1,290条`content`为空；`1d806e2`用回归测试复现并把四个可空文本字段规范化为`None`，只读生产副本验证1,366条均可构造类型化模型，未修改正式数据库。该失败不冒充容量样本，也未被吞掉。决策报告`20260819T085543130946Z-67ec00c035f545d381a34ee2b15cc8d9.json`继续为`collect_more_evidence`且`architecture_changed=false`，机器门槛缺口仅剩20个真实`run-preclose` Job；不可变修复发布后仍须由正常Scheduler经历真实交易日，不得用窗口外手工运行、初始化Job或合成指标替代。
+- OPS-03：正式`sync-calendar`确认交易日并写入21行，随后受90分钟systemd上限保护的初始`sync-eod`在2,243秒内成功同步5,547只证券、122个交易日和386,599条日线，共生成35个采集批次；连同前序日历批次，36份Parquet逐一重算Hash全部通过，数据库为Schema v10且行数匹配。2026-08-20部署前报告`20260820T042014083727Z-cfe8c7b3f7c8457c97afbbc2c58bd48d.json`记录5,433个成功锁样本、三类查询各20次、锁P95 0.000329秒、查询P95最大0.003249秒、恢复RTO 0.119秒及0条无效指标；对应决策`20260820T042025243356Z-ca0ab3289cf7440c8670f83a3ec9d4ff.json`仍为`collect_more_evidence`、`architecture_changed=false`，缺口仅为`job_duration_samples`。当天08:30真实`run-morning`在读取1,366条待处理资讯时因SQL NULL与VARCHAR投影产生的Pandas NaN触发Pydantic失败关闭，其中1,290条`content`为空；`1d806e2`用回归测试复现并把四个可空文本字段规范化为`None`，只读生产验证1,366条均可构造类型化模型，未修改正式数据库。进一步复核发现旧容量聚合会把`failed`、`missed`或无状态标签的短路Job计入分Job样本；`edea5d6`把容量报告升级为v2并固定`successful_or_degraded_jobs_v1`策略，旧版或缺策略报告失败关闭。新源码对真实指标文件只读验证时保留43个全局Job，同时仅把38个monitor、2个calendar和2个eod成功样本纳入分Job分布；失败morning未进入，真实14:40 `run-preclose`仍为0。不可变修复发布后仍须由正常Scheduler经历20个成功或降级完成的真实交易日Job，不得用失败、错过、窗口外手工运行、初始化Job或合成指标替代。
 
-OPS-A当前恢复入口：`1d806e2`的本地门禁、GitHub CI、离线受审Git来源和生产契约预检已通过；等待2026-08-20 15:15正式部署任务执行，随后验收备份、迁移副本、doctor、依赖锁Hash、Active Release、内外健康和失败回滚点，再由正常Scheduler累计20个真实14:40 Job并重算容量报告。阶段保持IN_PROGRESS；真实交易日尚未经过不是伪造样本或削弱门槛的理由。
+OPS-A当前恢复入口：`edea5d6`的本地门禁、GitHub CI、离线受审Git来源、服务器端真实指标语义和生产契约预检已通过；等待2026-08-20 15:15正式部署任务执行，随后验收备份、迁移副本、doctor、依赖锁Hash、Active Release、内外健康和失败回滚点，再由正常Scheduler累计20个成功或降级完成的真实14:40 Job并重算v2容量报告。阶段保持IN_PROGRESS；真实交易日尚未经过不是伪造样本或削弱门槛的理由。
 
 | 阶段ID | 阶段名称 | 工作包 | 点数 | 依赖 | 状态 | 阶段验收目标 |
 |---|---|---|---:|---|---|---|
@@ -1186,7 +1186,7 @@ worker_heartbeat_age_seconds
 - 多策略串行运行总耗时；
 - 备份和恢复耗时。
 
-M6-B把证据门槛固化为可执行Policy：至少20个`run-preclose`耗时样本、100个成功数据库锁样本、三类Dashboard查询各20次，以及一份成功恢复报告；阈值为14:40 Signal P95不超过384秒、锁等待P95不超过1秒、查询P95不超过2秒、恢复不超过300秒。证据不足固定结论为`collect_more_evidence`，单独查询或Job变慢先分别优化查询或批处理；只有Signal与锁同时超限、恢复RTO超限或出现明确多写入者/远程事务需求，才进入存储并发架构评估。
+M6-B把证据门槛固化为可执行Policy：至少20个状态为`success`或`degraded`的`run-preclose`耗时样本、100个成功数据库锁样本、三类Dashboard查询各20次，以及一份成功恢复报告；阈值为14:40 Signal P95不超过384秒、锁等待P95不超过1秒、查询P95不超过2秒、恢复不超过300秒。容量报告v2以`successful_or_degraded_jobs_v1`标识该样本策略，失败、错过或无状态标签的Job只保留在全局指标，旧版或缺少策略标识的报告失败关闭。证据不足固定结论为`collect_more_evidence`，单独查询或Job变慢先分别优化查询或批处理；只有Signal与锁同时超限、恢复RTO超限或出现明确多写入者/远程事务需求，才进入存储并发架构评估。
 
 2026-08-19真实数据只读副本演练：旧库仅在临时副本迁移到Schema v10，恢复健康耗时0.188秒；数据库54,276,096字节、Parquet 29,944,122字节，3次样本的最新Signal/开放持仓/最近Job查询P95分别约1.53/0.39/18.18毫秒。源库SHA-256前后均为`b7a3818c1e2b991bd8ee97a0aa523ca96e824861f8a68d8381133cca81e973fe`。由于缺少20个真实14:40 Job、100个锁样本和每类20次查询，当前正式结论为`collect_more_evidence`，不建议引入PostgreSQL或队列。
 
@@ -1268,6 +1268,7 @@ M6-B把证据门槛固化为可执行Policy：至少20个`run-preclose`耗时样
 | 2026-08-19 | `228f34f`（工作区） | 把OPS-A正式拆为Ubuntu引导、真实恢复演练和容量证据复算三个工作包 | 不改变168点架构路线；新增10点运维证据阶段，部署授权与入口配置满足前保持PLANNED | 远端盘点确认Ubuntu 24.04/Python 3.12.3及空白KFCQuant环境；受审源码归档Hash一致，但隔离venv因缺少`python3.12-venv`失败；Ruff、361项全量测试、85.00%合并覆盖率和文档diff检查通过；未执行系统级部署 |
 | 2026-08-19 | `228f34f`（工作区与远端基线） | OPS-A进入真实Ubuntu取证：裸IP自签名TLS引导、Active Release健康、正式备份、timer恢复、故障注入、初始行情同步与容量基线；修复生产wheel依赖锁身份和bootstrap过早切换 | OPS-01/03为BLOCKED、OPS-02为IN_PROGRESS，OPS-A为BLOCKED且0/10点；TD-018为IN_PROGRESS；168点架构路线保持完成；锁与查询门槛已满足，恢复入口为配置LLM密钥、授权不可变发布并继续真实Job积累 | 远端服务全健康；同步后源库/备份Hash一致；timer真实触发、Schema v10恢复与坏备份失败关闭通过；初始同步386,599条日线且36份采集快照Hash全部通过；103个成功锁样本和三类查询各20次，容量决策仅缺真实Job且未改变架构；连续三次Goal续跑确认LLM密钥、提交/发布授权及真实14:40 Job仍缺失；本地Ruff、363项全量测试、85.00%分支覆盖率、mypy、Bandit、secret扫描、pip-audit、运维专项与pip check通过，Ubuntu `bash -n`通过 |
 | 2026-08-20 | `1d806e2`（候选；生产Active仍为`228f34f`） | 恢复OPS-A并完成不可变发布候选：修正venv/Git隔离、共享数据库锁与health输出契约；真实晨间任务发现可空资讯投影NaN后补充失败回归和最小规范化修复；安排保护窗口后正式发布 | OPS-A与OPS-01/02/03均保持IN_PROGRESS且0/10点；TD-018保持IN_PROGRESS；不跨入后续阶段，新增资讯修复作为OPS-A不可分割前置且不计点 | 本地Ruff、368项全量测试、85.09%合并分支覆盖率、mypy、Bandit、secret扫描、pip-audit和pip check通过；GitHub Actions `32330394179`测试/打包通过；生产只读验证1,366条混合NULL资讯全部类型化，未修改正式数据库；受审bundle SHA-256为`522cc671d38fe324efc9de3cc47426c28d2f1a5948078d790ea1d7785361bcbb`；12:13 Active仍为`228f34f`且五项服务/定时器active，`1d806e2`正式部署已定时至15:15，真实`run-preclose`样本仍为0 |
+| 2026-08-20 | `edea5d6`（候选；生产Active仍为`228f34f`） | 修复OPS-03容量证据语义：分Job样本只接受`success/degraded`，报告v2记录策略，旧版/缺策略报告失败关闭；替换保护窗口后正式部署候选 | OPS-A与OPS-01/02/03均保持IN_PROGRESS且0/10点；新增容量修复作为阶段内不可分割前置且不计点；不改变168点架构路线或扩展架构 | 回归先暴露失败后通过；Ruff、368项全量测试、85.13%合并分支覆盖率、mypy、Bandit、secret扫描、pip-audit和pip check通过；GitHub Actions `32332088735`测试/打包通过；bundle SHA-256 `f46243fdb363c55aafb84c22442d83a963bd185f339bbdeb12e8aee5a251005f`并经服务器验证；真实指标只读聚合保留43个全局Job但排除失败morning，`run-preclose`仍为0；12:36新timer定时15:15且旧timer inactive |
 
 ---
 
@@ -1284,4 +1285,4 @@ KFCQuant当前不是混乱的脚本集合，而是边界意识较强、具备运
 5. M5降低模块耦合并建立主动观测；
 6. M6在真实指标证明需要时强化发布和扩展基础设施。
 
-M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3同样完成，市场与Run输入具备不可变快照和时间边界，风险事件还能继续定位Prompt、模型和输入Hash，多实体资讯不会再被压缩成单一`ts_code`。M4也已完成：Replay Clock、Manifest只读网关、实时/Replay共核、隔离历史Simulator和不可变Experiment/指标记录共同形成可审计实验闭环。M5同样完成：应用用例、Repository、Composition Root、Dashboard Query Model、结构化可观测性、84%合并分支覆盖率、核心契约类型检查、代码/依赖安全扫描和关键故障恢复证据共同形成可执行工程边界。M6也已完成：独立Release/venv、原子Active切换、机器可读迁移契约、隔离恢复演练、Release来源清单、secret门禁和量化容量决策共同消除了原地部署污染与主观扩展风险。当前证据支持继续保持模块化单体和DuckDB；OPS-A已在授权的真实Ubuntu环境中执行，下一步是验收`1d806e2`正式发布并由正常Scheduler积累20个真实14:40 Job，随后复算既定门槛，而不是引入PostgreSQL或队列。
+M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3同样完成，市场与Run输入具备不可变快照和时间边界，风险事件还能继续定位Prompt、模型和输入Hash，多实体资讯不会再被压缩成单一`ts_code`。M4也已完成：Replay Clock、Manifest只读网关、实时/Replay共核、隔离历史Simulator和不可变Experiment/指标记录共同形成可审计实验闭环。M5同样完成：应用用例、Repository、Composition Root、Dashboard Query Model、结构化可观测性、84%合并分支覆盖率、核心契约类型检查、代码/依赖安全扫描和关键故障恢复证据共同形成可执行工程边界。M6也已完成：独立Release/venv、原子Active切换、机器可读迁移契约、隔离恢复演练、Release来源清单、secret门禁和量化容量决策共同消除了原地部署污染与主观扩展风险。当前证据支持继续保持模块化单体和DuckDB；OPS-A已在授权的真实Ubuntu环境中执行，下一步是验收`edea5d6`正式发布并由正常Scheduler积累20个成功或降级完成的真实14:40 Job，随后复算既定门槛，而不是引入PostgreSQL或队列。
