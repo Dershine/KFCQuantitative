@@ -1088,12 +1088,21 @@ class Database:
         for row in entity_frame.to_dict("records"):
             entity = DocumentEntity.model_validate(row)
             entities_by_document.setdefault(entity.document_id, []).append(entity)
-        return [
-            NewsDocument.model_validate(
-                {**row, "entities": entities_by_document.get(str(row["document_id"]), [])}
-            )
-            for row in frame.to_dict("records")
-        ]
+        documents: list[NewsDocument] = []
+        for row in frame.to_dict("records"):
+            payload = {
+                **row,
+                "entities": entities_by_document.get(str(row["document_id"]), []),
+            }
+            # DuckDB's Pandas projection represents SQL NULL as float NaN when
+            # a nullable text column also contains strings. Restore the domain
+            # contract before strict Pydantic validation instead of spreading
+            # Pandas sentinel values beyond the repository adapter.
+            for field in ("ts_code", "content", "url", "processing_error"):
+                if pd.isna(payload[field]):
+                    payload[field] = None
+            documents.append(NewsDocument.model_validate(payload))
+        return documents
 
     def document_entities(self, document_id: str) -> pd.DataFrame:
         with self.connect(read_only=True) as connection:
