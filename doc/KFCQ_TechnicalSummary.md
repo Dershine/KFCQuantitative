@@ -10,7 +10,7 @@
 | 首次建立 | 2026-08-15 |
 | 最近复核 | 2026-08-20 |
 | 项目版本基线 | `0.2.0` |
-| 源码基线 | `edea5d6`（生产Active Release；GitHub CI与Ubuntu正式部署均通过；后续仅有README/本文档移交提交） |
+| 源码基线 | `630b1b4`（生产Active Release；资讯长任务续租修复已通过GitHub CI与Ubuntu正式部署） |
 | 适用范围 | Research Service、Operations Manager、数据与部署基础设施 |
 | 目标读者 | 项目维护者、策略开发者、代码审查者、部署维护者 |
 | 领域语言 | 以根目录 `CONTEXT.md` 为准 |
@@ -421,8 +421,8 @@ flowchart TD
 | 检查 | 结果 |
 |---|---|
 | Ruff | 通过 |
-| Pytest | 368项通过；1项Linux目录符号链接测试在Windows不适用而跳过 |
-| 总覆盖率 | 85.13%（Research与Operations合并且含分支；CI下限84%） |
+| Pytest | 370项通过；1项Linux目录符号链接测试在Windows不适用而跳过 |
+| 总覆盖率 | 85.14%（Research与Operations合并且含分支；CI下限84%） |
 | `observability.py` | 91%（含分支） |
 | `assurance.py`、`kfcops/cli.py` | 94% / 97%（含分支） |
 | `supply_chain.py` | 82%（含分支；关键secret、来源Hash及篡改分支已覆盖） |
@@ -545,6 +545,7 @@ flowchart TD
 | TD-016 | LOW | Python要求曾存在3.12/3.13口径差异 | 合法环境可能被doctor误判 | M1 | `DONE` |
 | TD-017 | LOW | CI曾缺少覆盖率门槛、类型检查和依赖安全检查 | 现由84%合并分支覆盖率、核心契约mypy、Bandit高严重度扫描和生产锁文件漏洞审计阻断退化 | M5 | `DONE` |
 | TD-018 | HIGH | wheel安装后的运行时曾从`site-packages`推导仓库根，导致依赖锁Hash显示为`unavailable` | `edea5d6`已在Ubuntu正式发布；Release环境显式携带并校验锁Hash，清单完整性检查、部署前副本预检、`pip check`和Active健康均通过 | OPS-A1 | `DONE` |
+| TD-019 | HIGH | 资讯同步可能超过Job lease，但早盘、尾盘和收盘用例此前只在同步前后续租 | `630b1b4`用短生命周期后台续租器包围阻塞同步；间隔不超过lease三分之一且上限30秒，续租失败继续失败关闭；单元回归与真实Provider/LLM长任务均证明到期时间持续后移 | 生产热修复 | `DONE` |
 
 技术债状态更新必须附带以下之一：
 
@@ -915,7 +916,7 @@ M6进度：`18 / 18 = 100%`。完成条件已满足：M6-A提供原子Release与
 
 OPS运行轨独立于上述168点架构路线。2026-08-20按运维者明确的投产收尾决策，将原`OPS-A`拆成`OPS-A1 发布与恢复收尾`（OPS-01/02，6点）和`OPS-A2 容量观察`（OPS-03，4点）：前者是本次重构的最终停止单元，后者转为不阻塞发布、使用或后续开发的长期运维观察项。`edea5d6`已通过本地门禁、GitHub CI和Ubuntu正式发布，OPS-A1为`6/6`且`DONE`。OPS-A2为`0/4`且`DEFERRED`；其锁、查询和恢复证据已满足，真实14:40成功/降级样本尚未达到20个，正常使用自然积累后再复算，不允许用失败、手工或合成样本凑数。
 
-本文中的`100%`始终表示M0至M6工作点完成度`168/168`；`85.13%`表示最近一次全量测试的合并分支覆盖率，不是项目进度，也不表示仍有14.87%的架构工作未完成。
+本文中的`100%`始终表示M0至M6工作点完成度`168/168`；`85.14%`表示最近一次全量测试的合并分支覆盖率，不是项目进度，也不表示仍有14.86%的架构工作未完成。
 
 ### 12.1 当前建议的下一工程阶段
 
@@ -937,7 +938,9 @@ OPS-A最近证据（2026-08-20）：
 - OPS-02：引导后正式备份、真实timer恢复和故障演练通过；成功报告`20260819T085457943422Z-3a57ce123c3f41528d64ac21252fa6cf.json`验证隔离副本Hash、DuckDB只读打开、Schema v10及核心表，耗时0.119秒。坏备份注入以退出码1和DuckDB `IOException`失败关闭，正式库、好备份、Active Release和服务保持不变。正式发布又在停服后生成`20260820151630-edea5d6c53c4.duckdb`，其创建时与正式库Hash一致；迁移副本预检、无Schema变化矩阵、原子切换和新服务健康均通过。清理后保留该正式备份、旧`228f34f`回滚Release、运行日志和每周日03:30加随机延迟的非破坏性恢复timer。本包`DONE`。
 - OPS-03：正式`sync-calendar`确认交易日并写入21行，随后受90分钟systemd上限保护的初始`sync-eod`在2,243秒内成功同步5,547只证券、122个交易日和386,599条日线，共生成35个采集批次；连同前序日历批次，36份Parquet逐一重算Hash全部通过，数据库为Schema v10且行数匹配。2026-08-20部署前报告`20260820T042014083727Z-cfe8c7b3f7c8457c97afbbc2c58bd48d.json`记录5,433个成功锁样本、三类查询各20次、锁P95 0.000329秒、查询P95最大0.003249秒、恢复RTO 0.119秒及0条无效指标；对应决策`20260820T042025243356Z-ca0ab3289cf7440c8670f83a3ec9d4ff.json`仍为`collect_more_evidence`、`architecture_changed=false`，缺口仅为`job_duration_samples`。当天08:30真实`run-morning`在读取1,366条待处理资讯时因SQL NULL与VARCHAR投影产生的Pandas NaN触发Pydantic失败关闭，其中1,290条`content`为空；`1d806e2`用回归测试复现并把四个可空文本字段规范化为`None`，只读生产验证1,366条均可构造类型化模型，未修改正式数据库。进一步复核发现旧容量聚合会把`failed`、`missed`或无状态标签的短路Job计入分Job样本；`edea5d6`把容量报告升级为v2并固定`successful_or_degraded_jobs_v1`策略，旧版或缺策略报告失败关闭。新源码对真实指标文件只读验证时保留43个全局Job，同时仅把38个monitor、2个calendar和2个eod成功样本纳入分Job分布；失败morning未进入，真实14:40 `run-preclose`仍为0。不可变修复发布后仍须由正常Scheduler经历20个成功或降级完成的真实交易日Job，不得用失败、错过、窗口外手工运行、初始化Job或合成指标替代。
 
-OPS-A1最终证据：部署记录id=4于2026-08-20 15:15:02开始、15:16:37成功，目标`edea5d6`、前版`228f34f`；流水依次通过CI校验、资源检查、独立Release构建、数据库副本迁移预检、停服备份、正式迁移、原子切换、启动和健康检查。迁移审计`copy_migration_verified=true`，正式库、Active和目标均为Schema v10且无待执行迁移，隔离副本在预检后清理。部署前备份`20260820151630-edea5d6c53c4.duckdb`与切换时正式库均为74,461,184字节且SHA-256同为`2759577a343127e73bfad656e0d05a828b031a6f021b5d4f9850895a4e7be321`；Ops状态保留该备份和`228f34f`回滚点。Release Manifest校验通过，`requirements.lock`实际Hash与清单均为`2685e95949e8105389fa834b26a4c0683e00efb48d2417693d69f3918455f669`，`pip check`无损坏依赖；离线doctor通过Python、数据库、learning profile、Baostock、AkShare、LLM密钥及全部运行模块。worker/web/kfcops/nginx和每周assurance timer均为active；裸IP Research、Research health与Ops入口均为未认证401、Basic Auth后200。清理后仅保留Active `edea5d6`、回滚Release `228f34f`、正式备份/日志、每周隔离恢复timer和产品worker Scheduler；transient部署单元已卸载，4个旧deploy-tools worktree、失败Release、5个incoming bundle及root明文初始凭据已删除，root-only htpasswd Hash备份保持`600 root:root`。服务器控制仓库origin已恢复GitHub，main随后同步本次移交文档提交而Active仍固定为`edea5d6`；未连接真实券商，未删除或手工改写正式数据库。OPS-A1据此为`DONE`。
+OPS-A1初次最终证据：部署记录id=4于2026-08-20 15:15:02开始、15:16:37成功，目标`edea5d6`、前版`228f34f`；流水依次通过CI校验、资源检查、独立Release构建、数据库副本迁移预检、停服备份、正式迁移、原子切换、启动和健康检查。迁移审计`copy_migration_verified=true`，正式库、Active和目标均为Schema v10且无待执行迁移，隔离副本在预检后清理。部署前备份`20260820151630-edea5d6c53c4.duckdb`与切换时正式库均为74,461,184字节且SHA-256同为`2759577a343127e73bfad656e0d05a828b031a6f021b5d4f9850895a4e7be321`；Ops状态当时保留该备份和`228f34f`回滚点。Release Manifest校验通过，`requirements.lock`实际Hash与清单均为`2685e95949e8105389fa834b26a4c0683e00efb48d2417693d69f3918455f669`，`pip check`无损坏依赖；离线doctor通过Python、数据库、learning profile、Baostock、AkShare、LLM密钥及全部运行模块。worker/web/kfcops/nginx和每周assurance timer均为active；裸IP Research、Research health与Ops入口均为未认证401、Basic Auth后200。初次清理后仅保留Active `edea5d6`、回滚Release `228f34f`、正式备份/日志、每周隔离恢复timer和产品worker Scheduler；transient部署单元已卸载，4个旧deploy-tools worktree、失败Release、5个incoming bundle及root明文初始凭据已删除，root-only htpasswd Hash备份保持`600 root:root`。服务器控制仓库origin已恢复GitHub；未连接真实券商，未删除或手工改写正式数据库。OPS-A1据此为`DONE`。
+
+投产反馈与当前证据：15:16上线时间晚于当日08:30与14:40推荐窗口，因此当晚`signal_runs=0`且页面无推荐是符合调度语义的；20:30收盘任务只同步资讯、评估既有Run并生成报告，不补造盘后推荐。原20:30任务在处理大量真实资讯时超过15分钟lease，暴露TD-019并由启动恢复机制标记为失败；`630b1b4`修复早盘、尾盘和收盘三条链路的长同步续租后，GitHub Actions `32370688488`成功。部署记录id=5于20:51:43请求、20:53:32成功，目标`630b1b4`、前版`edea5d6`；部署前备份`20260820205324-630b1b4e2139.duckdb`为85,995,520字节，SHA-256为`100bd206dac17438d7834ef4c4da2a237a6b15650760517bd51d414287e775ab`。当前Active为`630b1b4`、回滚Release为`edea5d6`，依赖锁Hash仍为`2685e95949e8105389fa834b26a4c0683e00efb48d2417693d69f3918455f669`；五项服务/定时器健康。真实AkShare与LLM收盘任务已观察到每30秒续租并持续后移到期时间；一次运行中并发诊断读取触发DuckDB锁冲突后，任务按15分钟lease自然过期并由下一次启动自动恢复为`failed`，没有直接改写任务状态或正式数据。随后唯一一次正式重跑`f2ea7182-048d-4ccc-b103-154af3781e96`于21:18:50启动、21:22:22成功，耗时211.979秒，7,879条资讯全部为`processed`、待处理为0，生成1份真实收盘报告；正式健康检查为`ok`，Schema v10、worker源码无脏改动且磁盘剩余约42.0GB。诊断改用任务结束后的正式健康/报告证据，不把临时诊断脚本留在服务器。下一交易日2026-08-21的08:30与14:40由产品Scheduler自动执行首次正式推荐链路。
 
 OPS-A2由正常使用自然积累成功或降级完成的真实14:40 Job；证据达到门槛时再重算v2容量报告，未达到门槛只保持`collect_more_evidence`，不影响系统使用。2026-08-20的14:40失败发生在`edea5d6`部署前，不能计入样本；下一工作日08:30与14:40由新Active Release首次正式执行。
 
@@ -1283,6 +1286,7 @@ M6-B把证据门槛固化为可执行Policy：至少20个状态为`success`或`d
 | 2026-08-20 | `1d806e2`（候选；生产Active仍为`228f34f`） | 恢复OPS-A并完成不可变发布候选：修正venv/Git隔离、共享数据库锁与health输出契约；真实晨间任务发现可空资讯投影NaN后补充失败回归和最小规范化修复；安排保护窗口后正式发布 | OPS-A与OPS-01/02/03均保持IN_PROGRESS且0/10点；TD-018保持IN_PROGRESS；不跨入后续阶段，新增资讯修复作为OPS-A不可分割前置且不计点 | 本地Ruff、368项全量测试、85.09%合并分支覆盖率、mypy、Bandit、secret扫描、pip-audit和pip check通过；GitHub Actions `32330394179`测试/打包通过；生产只读验证1,366条混合NULL资讯全部类型化，未修改正式数据库；受审bundle SHA-256为`522cc671d38fe324efc9de3cc47426c28d2f1a5948078d790ea1d7785361bcbb`；12:13 Active仍为`228f34f`且五项服务/定时器active，`1d806e2`正式部署已定时至15:15，真实`run-preclose`样本仍为0 |
 | 2026-08-20 | `edea5d6`（候选；生产Active仍为`228f34f`） | 修复OPS-03容量证据语义：分Job样本只接受`success/degraded`，报告v2记录策略，旧版/缺策略报告失败关闭；替换保护窗口后正式部署候选 | OPS-A与OPS-01/02/03均保持IN_PROGRESS且0/10点；新增容量修复作为阶段内不可分割前置且不计点；不改变168点架构路线或扩展架构 | 回归先暴露失败后通过；Ruff、368项全量测试、85.13%合并分支覆盖率、mypy、Bandit、secret扫描、pip-audit和pip check通过；GitHub Actions `32332088735`测试/打包通过；bundle SHA-256 `f46243fdb363c55aafb84c22442d83a963bd185f339bbdeb12e8aee5a251005f`并经服务器验证；真实指标只读聚合保留43个全局Job但排除失败morning，`run-preclose`仍为0；12:36新timer定时15:15且旧timer inactive |
 | 2026-08-20 | `edea5d6`（生产Active；本文档移交提交） | 完成OPS-A1正式发布、恢复验收与环境清理；将OPS-03重分类为不阻塞使用的OPS-A2容量观察 | OPS-01/02与OPS-A1均DONE，6/6点；M0-M6保持168/168与100%；OPS-A2为0/4且DEFERRED；TD-018完成；没有待启动的架构阶段 | 部署id=4与迁移副本预检成功；Active/备份/回滚/Manifest/锁Hash/pip check/doctor/五项服务及裸IP 401/200验收通过；清理后仅保留两份Release、正式备份/日志、产品Scheduler与每周恢复timer；Ruff、368项全量测试、85.13%合并分支覆盖率及最终diff/secret审计通过 |
+| 2026-08-20 | `630b1b4`（生产Active） | 生产20:30资讯积压暴露长同步超过15分钟lease；为早盘、尾盘和收盘统一增加同步期间后台续租并保持续租失败关闭 | 不改变M0-M6 168/168或OPS-A1 DONE；新增TD-019并当次完成；无Schema、依赖、策略、评分、订单或券商变化 | 回归先以缺少heartbeat契约失败后通过；30项关联回归、370项全量测试、85.14%合并分支覆盖率、Ruff、mypy、Bandit、secret扫描及pip check通过；GitHub Actions `32370688488`成功，部署id=5成功；真实AkShare/LLM任务每30秒续租且lease到期时间持续后移；过期任务由正式入口恢复后唯一一次重跑成功，7,879条资讯全部处理并生成1份报告，最终health为`ok` |
 
 ---
 
