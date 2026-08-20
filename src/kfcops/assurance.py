@@ -23,6 +23,9 @@ from kfcops.store import OpsStore
 REQUIRED_RESEARCH_TABLES = frozenset(
     {"schema_migrations", "paper_account", "signal_runs", "candidate_scores", "job_runs"}
 )
+CAPACITY_REPORT_VERSION = 2
+CAPACITY_JOB_SAMPLE_POLICY = "successful_or_degraded_jobs_v1"
+CAPACITY_ELIGIBLE_JOB_STATUSES = frozenset({"success", "degraded"})
 
 
 class CapacityRecommendation(StrEnum):
@@ -213,7 +216,12 @@ class AssuranceManager:
                     if metric == "job_duration_seconds":
                         labels = record.get("labels") or {}
                         job_name = labels.get("job_name") if isinstance(labels, dict) else None
-                        if isinstance(job_name, str) and job_name:
+                        status = labels.get("status") if isinstance(labels, dict) else None
+                        if (
+                            isinstance(job_name, str)
+                            and job_name
+                            and status in CAPACITY_ELIGIBLE_JOB_STATUSES
+                        ):
                             selected.setdefault(f"job_duration_seconds:{job_name}", []).append(value)
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     invalid += 1
@@ -268,7 +276,8 @@ class AssuranceManager:
         started = self.timer()
         metric_values, invalid = self._read_metrics()
         report: dict[str, Any] = {
-            "report_version": 1,
+            "report_version": CAPACITY_REPORT_VERSION,
+            "job_sample_policy": CAPACITY_JOB_SAMPLE_POLICY,
             "collected_at": self.clock().isoformat(),
             "status": "partial",
             "metrics": {name: _distribution(values) for name, values in metric_values.items()},
@@ -332,6 +341,11 @@ class AssuranceManager:
         job = metrics.get("job_duration_seconds:run-preclose", {})
         lock = metrics.get("database_lock_wait_seconds", {})
         missing: list[str] = []
+        if (
+            baseline.get("report_version") != CAPACITY_REPORT_VERSION
+            or baseline.get("job_sample_policy") != CAPACITY_JOB_SAMPLE_POLICY
+        ):
+            missing.append("job_sample_policy")
         if baseline.get("record_sha256") is not None and not _report_hash_valid(baseline):
             missing.append("baseline_record_integrity")
         if int(job.get("count", 0)) < self.settings.capacity_minimum_job_samples:

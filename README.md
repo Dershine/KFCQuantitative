@@ -341,7 +341,7 @@ sudo journalctl -u kfcquant-assurance.service -n 100
 sudo -u kfcops bash -c 'set -a; source /etc/kfcquant/ops.env; set +a; /opt/kfcquant/current/.venv/bin/kfcops capacity-baseline --json'
 ```
 
-报告位于`/var/lib/kfcops/assurance/capacity-baselines/`。扩展判定至少要求20个14:40 Job、100个成功锁等待、每类20个查询和一次成功恢复；证据不足时结果固定为`collect_more_evidence`，不会据此引入PostgreSQL或任务队列。对某份报告复算：
+报告位于`/var/lib/kfcops/assurance/capacity-baselines/`。扩展判定至少要求20个状态为`success`或`degraded`的14:40 Job、100个成功锁等待、每类20个查询和一次成功恢复；失败、错过或缺少状态标签的Job仍保留在全局运行指标中，但不会计入分Job容量样本。旧版或缺少样本策略标识的报告失败关闭为`collect_more_evidence`，不会据此引入PostgreSQL或任务队列。对某份报告复算：
 
 ```bash
 sudo -u kfcops bash -c 'set -a; source /etc/kfcquant/ops.env; set +a; /opt/kfcquant/current/.venv/bin/kfcops capacity-decision /var/lib/kfcops/assurance/capacity-baselines/<报告>.json --json'

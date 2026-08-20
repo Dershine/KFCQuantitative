@@ -9,7 +9,12 @@ from pathlib import Path
 import pytest
 from filelock import FileLock
 
-from kfcops.assurance import AssuranceManager, CapacityRecommendation
+from kfcops.assurance import (
+    CAPACITY_JOB_SAMPLE_POLICY,
+    CAPACITY_REPORT_VERSION,
+    AssuranceManager,
+    CapacityRecommendation,
+)
 from kfcops.config import OpsSettings
 from kfcops.deployment import DeploymentManager
 from kfcops.store import OpsStore
@@ -205,8 +210,11 @@ def test_capacity_baseline_aggregates_metrics_queries_sizes_and_recovery_evidenc
     settings = m6b_settings(tmp_path)
     backup = prepare_backup(settings)
     AssuranceManager(settings, OpsStore(settings.database_path)).run_recovery_drill(backup)
-    write_metric(settings.metrics_path, "job_duration_seconds", 10, stage="run-preclose")
-    write_metric(settings.metrics_path, "job_duration_seconds", 20, stage="run-preclose")
+    write_metric(settings.metrics_path, "job_duration_seconds", 10, job_name="run-preclose", status="success")
+    write_metric(settings.metrics_path, "job_duration_seconds", 20, job_name="run-preclose", status="degraded")
+    write_metric(settings.metrics_path, "job_duration_seconds", 1, job_name="run-preclose", status="failed")
+    write_metric(settings.metrics_path, "job_duration_seconds", 2, job_name="run-preclose", status="missed")
+    write_metric(settings.metrics_path, "job_duration_seconds", 3, job_name="run-preclose")
     write_metric(settings.metrics_path, "database_lock_wait_seconds", 0.01, outcome="acquired")
     write_metric(settings.metrics_path, "database_lock_wait_seconds", 0.02, outcome="acquired")
     with settings.metrics_path.open("a", encoding="utf-8") as stream:
@@ -218,8 +226,12 @@ def test_capacity_baseline_aggregates_metrics_queries_sizes_and_recovery_evidenc
     report = manager.collect_capacity_baseline(query_samples=3)
 
     assert report["status"] == "complete"
-    assert report["metrics"]["job_duration_seconds"]["count"] == 2
+    assert report["report_version"] == CAPACITY_REPORT_VERSION
+    assert report["job_sample_policy"] == CAPACITY_JOB_SAMPLE_POLICY
+    assert report["metrics"]["job_duration_seconds"]["count"] == 5
     assert report["metrics"]["job_duration_seconds"]["p95"] == 20
+    assert report["metrics"]["job_duration_seconds:run-preclose"]["count"] == 2
+    assert report["metrics"]["job_duration_seconds:run-preclose"]["p95"] == 20
     assert report["metrics"]["database_lock_wait_seconds"]["count"] >= 2
     assert report["invalid_metric_lines"] == 1
     assert set(report["queries"]) == {"latest_signal", "open_positions", "recent_jobs"}
@@ -238,6 +250,8 @@ def test_capacity_decision_is_fail_closed_when_evidence_is_thin_and_quantitative
     assert thin["recommendation"] == CapacityRecommendation.COLLECT_MORE_EVIDENCE.value
 
     baseline = {
+        "report_version": CAPACITY_REPORT_VERSION,
+        "job_sample_policy": CAPACITY_JOB_SAMPLE_POLICY,
         "status": "complete",
         "metrics": {
             "job_duration_seconds": {"count": 2, "p95": 10.0},
@@ -253,6 +267,12 @@ def test_capacity_decision_is_fail_closed_when_evidence_is_thin_and_quantitative
     }
     stable = manager.evaluate_capacity(baseline)
     assert stable["recommendation"] == CapacityRecommendation.CONTINUE_DUCKDB.value
+
+    legacy = {key: value for key, value in baseline.items() if key != "job_sample_policy"}
+    legacy["report_version"] = CAPACITY_REPORT_VERSION - 1
+    legacy_decision = manager.evaluate_capacity(legacy)
+    assert legacy_decision["recommendation"] == CapacityRecommendation.COLLECT_MORE_EVIDENCE.value
+    assert "job_sample_policy" in legacy_decision["missing_evidence"]
 
     baseline["metrics"]["job_duration_seconds:run-preclose"]["p95"] = (
         settings.capacity_signal_runtime_budget_seconds + 1
