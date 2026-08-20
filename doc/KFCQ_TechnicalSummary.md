@@ -10,7 +10,7 @@
 | 首次建立 | 2026-08-15 |
 | 最近复核 | 2026-08-20 |
 | 项目版本基线 | `0.2.0` |
-| 源码基线 | `edea5d6`（OPS-A候选源码已提交、推送且CI通过；生产Active Release仍为`228f34f`，等待保护窗口后的正式发布） |
+| 源码基线 | `edea5d6`（生产Active Release；GitHub CI与Ubuntu正式部署均通过；后续仅有README/本文档移交提交） |
 | 适用范围 | Research Service、Operations Manager、数据与部署基础设施 |
 | 目标读者 | 项目维护者、策略开发者、代码审查者、部署维护者 |
 | 领域语言 | 以根目录 `CONTEXT.md` 为准 |
@@ -544,7 +544,7 @@ flowchart TD
 | TD-015 | MEDIUM | LLM Prompt与响应曾缺少完整版本和追踪元数据 | 风险事件已关联Prompt/Input/Response Hash、模型、耗时和失败元数据 | M3 | `DONE` |
 | TD-016 | LOW | Python要求曾存在3.12/3.13口径差异 | 合法环境可能被doctor误判 | M1 | `DONE` |
 | TD-017 | LOW | CI曾缺少覆盖率门槛、类型检查和依赖安全检查 | 现由84%合并分支覆盖率、核心契约mypy、Bandit高严重度扫描和生产锁文件漏洞审计阻断退化 | M5 | `DONE` |
-| TD-018 | HIGH | wheel安装后的运行时曾从`site-packages`推导仓库根，导致依赖锁Hash显示为`unavailable` | `edea5d6`候选已让Release环境显式携带并校验锁Hash，且完整性检查拒绝环境值漂移；本地质量门禁与GitHub CI已通过，尚待保护窗口后的Ubuntu Active Release发布验收 | OPS-A | `IN_PROGRESS` |
+| TD-018 | HIGH | wheel安装后的运行时曾从`site-packages`推导仓库根，导致依赖锁Hash显示为`unavailable` | `edea5d6`已在Ubuntu正式发布；Release环境显式携带并校验锁Hash，清单完整性检查、部署前副本预检、`pip check`和Active健康均通过 | OPS-A1 | `DONE` |
 
 技术债状态更新必须附带以下之一：
 
@@ -913,29 +913,33 @@ M6进度：`18 / 18 = 100%`。完成条件已满足：M6-A提供原子Release与
 | M6 发布强化与规模决策 | 18 | 18 | 100% | `DONE` | 2026-08-19完成M6-B；隔离恢复、Release来源、secret门禁、性能/锁基线和扩展决策通过 |
 | **总体** | **168** | **168** | **100%** | `DONE` | M0至M6全部完成；下一步为生产证据积累，不立即扩展架构 |
 
-OPS-A是独立运行证据阶段，不并入上述168点架构路线。当前已验收点数为`0/10`：三个工作包均已有真实产物；Research密钥与提交、推送、部署授权已满足，`edea5d6`不可变候选已通过本地门禁与GitHub CI并安排在交易保护窗口结束后发布。正式Active Release在验收前仍为`228f34f`，因此OPS-01尚未DONE，OPS-02受其依赖约束尚不能计点；OPS-03的锁与查询门槛虽已满足，仍必须继续等待20个成功或降级完成的真实14:40 Job，不能提前计点。
+OPS运行轨独立于上述168点架构路线。2026-08-20按运维者明确的投产收尾决策，将原`OPS-A`拆成`OPS-A1 发布与恢复收尾`（OPS-01/02，6点）和`OPS-A2 容量观察`（OPS-03，4点）：前者是本次重构的最终停止单元，后者转为不阻塞发布、使用或后续开发的长期运维观察项。`edea5d6`已通过本地门禁、GitHub CI和Ubuntu正式发布，OPS-A1为`6/6`且`DONE`。OPS-A2为`0/4`且`DEFERRED`；其锁、查询和恢复证据已满足，真实14:40成功/降级样本尚未达到20个，正常使用自然积累后再复算，不允许用失败、手工或合成样本凑数。
+
+本文中的`100%`始终表示M0至M6工作点完成度`168/168`；`85.13%`表示最近一次全量测试的合并分支覆盖率，不是项目进度，也不表示仍有14.87%的架构工作未完成。
 
 ### 12.1 当前建议的下一工程阶段
 
-工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M0至M6以及M1-A至M6-B已经全部完成。下一建议阶段是`OPS-A 生产保障证据积累`。该阶段独立于已经完成的168点架构路线，不改变M0至M6完成度；它只把M6-B建立的恢复与容量门槛放入真实Ubuntu运行环境取证，不授权引入PostgreSQL、队列或真实券商连接。
+工作包仍是最小验收单元；工程阶段是连续推进任务和`/goal`的默认停止单元。M0至M6以及M1-A至M6-B已经全部完成。本次收尾阶段是`OPS-A1 发布与恢复收尾`，依次完成OPS-01和OPS-02；验收后没有已计划但尚未开始的架构开发阶段。`OPS-A2 容量观察`只把正常使用自然产生的运行指标用于将来复算，不授权引入PostgreSQL、队列或真实券商连接，也不要求保持一个开发Goal等待20个交易日。
 
 | 工作包 | 名称 | 点数 | 依赖 | Definition of Done | 状态 |
 |---|---|---:|---|---|---|
-| OPS-01 | Ubuntu引导与Active Release基线 | 3 | M6-B；专用Ubuntu环境；明确的系统级部署授权与入口配置 | 从已审查SHA建立不可变Release、独立venv和原子`current`链接；Research/Ops配置通过启动校验；worker、web与ops服务健康；构建或配置失败不污染Active Release | `IN_PROGRESS` |
-| OPS-02 | 定时恢复与服务健康演练 | 3 | OPS-01；至少一份由正式备份流程产生的保留备份 | 已安装timer真实触发一次隔离恢复；报告Hash、DuckDB、Schema和核心表健康通过；演练前后Active Release、正式数据库和备份Hash不变；失败注入产生非零状态且服务健康可恢复 | `IN_PROGRESS` |
-| OPS-03 | 运行容量证据与决策复算 | 4 | OPS-01、OPS-02；正常调度与指标持续运行 | 累计至少20个真实14:40 Job、100个成功锁等待和三类查询各20次；容量报告完整且Hash有效；按既定阈值复算并记录结论，证据不足或指标超限均不得自动改变架构 | `IN_PROGRESS` |
+| OPS-01 | Ubuntu引导与Active Release基线 | 3 | M6-B；专用Ubuntu环境；明确的系统级部署授权与入口配置 | 从已审查SHA建立不可变Release、独立venv和原子`current`链接；Research/Ops配置通过启动校验；worker、web与ops服务健康；构建或配置失败不污染Active Release | `DONE` |
+| OPS-02 | 定时恢复与服务健康演练 | 3 | OPS-01；至少一份由正式备份流程产生的保留备份 | 已安装timer真实触发一次隔离恢复；报告Hash、DuckDB、Schema和核心表健康通过；演练前后Active Release、正式数据库和备份Hash不变；失败注入产生非零状态且服务健康可恢复 | `DONE` |
+| OPS-03 | 运行容量证据与决策复算 | 4 | OPS-01、OPS-02；正常调度与指标持续运行 | 累计至少20个真实14:40 Job、100个成功锁等待和三类查询各20次；容量报告完整且Hash有效；按既定阈值复算并记录结论，证据不足或指标超限均不得自动改变架构 | `DEFERRED` |
 
-OPS-A总点数：`10`。工作顺序为OPS-01 → OPS-02 → OPS-03。阶段级验收要求三包全部`DONE`，真实systemd触发、服务健康、隔离恢复、故障恢复和容量决策证据可审计，Ruff、全量Pytest、相关覆盖率及适用部署/锁/恢复专项通过，并复核远端未泄露密钥、未连接券商、未削弱Research/Operations隔离和Active Release回滚能力。
+OPS运行轨总点数仍为`10`，但停止单元已拆分。`OPS-A1`为6点，阶段级验收要求OPS-01/02全部`DONE`，正式Active Release、服务健康、部署前备份、迁移副本、隔离恢复、失败回滚和入口可用证据可审计，Ruff、全量Pytest、相关覆盖率及适用部署/恢复专项通过，并复核远端未泄露密钥、未连接券商、未削弱Research/Operations隔离和Active Release回滚能力。`OPS-A2`为4点且`DEFERRED`；正常使用会自然积累证据，但它不是投产门禁或本次重构Goal的停止条件。
 
 OPS-A的Definition of Ready还要求：服务器被明确授权作为KFCQuant专用环境；允许创建系统用户并写入`/opt/kfcquant`、`/var/lib/kfcquant`、`/var/lib/kfcops`、`/etc/kfcquant`、systemd和Nginx配置；入口域名或IP、证书邮箱和Basic Auth方式明确；Research密钥由运维者在服务器上安全配置；待部署源码可通过GitHub验证或经审计的离线Git来源传输。任一条件缺失时阶段保持`PLANNED`，不得以Fake或人工合成14:40样本替代生产证据。
 
 OPS-A最近证据（2026-08-20）：
 
-- OPS-01：`43.136.108.53`已从受审`228f34f`建立独立Release/venv和`current`链接；Ubuntu 24.04、Python 3.12.3、Nginx、worker、web、ops与assurance timer均健康，裸IP入口使用IP SAN自签名TLS与Basic Auth，证书私钥和初始凭据权限分别为`640 root:kfcquant`与`600 root:root`。外部`/ops/`无凭据返回401，Research/Ops内部健康返回200。真实wheel运行发现依赖锁Hash为`unavailable`后，`5251fc1`、`9cfa545`、`19c045e`和`85ab83f`依次补齐显式Release环境、不可变venv路径、隔离Git环境以及共享锁/健康输出契约；`1d806e2`修复真实晨间任务暴露的可空资讯投影，`edea5d6`再让失败或错过的Job不能满足容量门槛，两项均为本阶段不可分割的运行前置。最新候选在本地通过Ruff、368项全量测试、85.13%合并分支覆盖率、mypy、Bandit、secret扫描、pip-audit及pip check，GitHub Actions运行`32332088735`的测试与打包均通过。服务器持有受审bundle `/var/lib/kfcops/incoming-edea.bundle`，SHA-256为`f46243fdb363c55aafb84c22442d83a963bd185f339bbdeb12e8aee5a251005f`、权限`640 kfcops:kfcquant`；服务器Git仓库已验证完整历史、目标对象、干净状态和`deployable=true`。2026-08-20 12:36复核确认Active Release仍为`228f34f`，资源余量、入口/内部健康和锁状态正常，并由transient systemd timer安排`edea5d6`在15:15保护窗口结束后执行正式部署；旧`1d806e2` timer已停止。本包保持IN_PROGRESS，只有原子切换、备份/迁移、依赖锁Hash、服务健康及失败回滚点全部验收后才能DONE。
-- OPS-02：引导后正式备份与首次timer/故障演练通过；完成历史初始化后又由同一正式部署备份实现生成`20260819165446-228f34f847ae.duckdb`，其SHA-256在创建时与正式库均为`4d27c8f566d2f693feea842566c5a834281d1e92e5f7d62dba8e8ae7cd217d74`；正式库随后由正常Scheduler继续写入，不能再用旧Hash声称当前相等。已安装timer真实触发成功并恢复到每周日03:30加随机延迟的计划；最新成功报告`20260819T085457943422Z-3a57ce123c3f41528d64ac21252fa6cf.json`验证隔离副本Hash相同、DuckDB只读打开、Schema v10及核心表健康，耗时0.119秒。坏备份注入报告以退出码1和DuckDB `IOException`失败关闭；正式库、好备份、Active Release和四个服务保持不变，测试文件与timer覆盖均已清理。DoD证据本身已通过，但在OPS-01依赖完成前保持IN_PROGRESS；正式发布后还须复核新备份、Active与服务状态未受失败发布污染。
+- OPS-01：`43.136.108.53`已从受审SHA建立不可变Release/venv和原子`current`链接；Ubuntu 24.04、Python 3.12.3、Nginx、worker、web、ops与assurance timer健康，裸IP入口使用IP SAN自签名TLS与Basic Auth。真实wheel运行先暴露依赖锁身份、Git/venv隔离、共享锁/健康契约与可空资讯问题，均以回归测试和最小改动修复；最终`edea5d6`通过Ruff、368项全量测试、85.13%合并分支覆盖率、mypy、Bandit、secret扫描、pip-audit、pip check及GitHub Actions `32332088735`。15:15正式部署id=4成功，Release Manifest、锁Hash、离线doctor、Active链接、五项服务以及裸IP未认证401/认证后200全部通过；服务器控制仓库恢复GitHub origin，临时发布资源和明文初始凭据已清理。本包`DONE`。
+- OPS-02：引导后正式备份、真实timer恢复和故障演练通过；成功报告`20260819T085457943422Z-3a57ce123c3f41528d64ac21252fa6cf.json`验证隔离副本Hash、DuckDB只读打开、Schema v10及核心表，耗时0.119秒。坏备份注入以退出码1和DuckDB `IOException`失败关闭，正式库、好备份、Active Release和服务保持不变。正式发布又在停服后生成`20260820151630-edea5d6c53c4.duckdb`，其创建时与正式库Hash一致；迁移副本预检、无Schema变化矩阵、原子切换和新服务健康均通过。清理后保留该正式备份、旧`228f34f`回滚Release、运行日志和每周日03:30加随机延迟的非破坏性恢复timer。本包`DONE`。
 - OPS-03：正式`sync-calendar`确认交易日并写入21行，随后受90分钟systemd上限保护的初始`sync-eod`在2,243秒内成功同步5,547只证券、122个交易日和386,599条日线，共生成35个采集批次；连同前序日历批次，36份Parquet逐一重算Hash全部通过，数据库为Schema v10且行数匹配。2026-08-20部署前报告`20260820T042014083727Z-cfe8c7b3f7c8457c97afbbc2c58bd48d.json`记录5,433个成功锁样本、三类查询各20次、锁P95 0.000329秒、查询P95最大0.003249秒、恢复RTO 0.119秒及0条无效指标；对应决策`20260820T042025243356Z-ca0ab3289cf7440c8670f83a3ec9d4ff.json`仍为`collect_more_evidence`、`architecture_changed=false`，缺口仅为`job_duration_samples`。当天08:30真实`run-morning`在读取1,366条待处理资讯时因SQL NULL与VARCHAR投影产生的Pandas NaN触发Pydantic失败关闭，其中1,290条`content`为空；`1d806e2`用回归测试复现并把四个可空文本字段规范化为`None`，只读生产验证1,366条均可构造类型化模型，未修改正式数据库。进一步复核发现旧容量聚合会把`failed`、`missed`或无状态标签的短路Job计入分Job样本；`edea5d6`把容量报告升级为v2并固定`successful_or_degraded_jobs_v1`策略，旧版或缺策略报告失败关闭。新源码对真实指标文件只读验证时保留43个全局Job，同时仅把38个monitor、2个calendar和2个eod成功样本纳入分Job分布；失败morning未进入，真实14:40 `run-preclose`仍为0。不可变修复发布后仍须由正常Scheduler经历20个成功或降级完成的真实交易日Job，不得用失败、错过、窗口外手工运行、初始化Job或合成指标替代。
 
-OPS-A当前恢复入口：`edea5d6`的本地门禁、GitHub CI、离线受审Git来源、服务器端真实指标语义和生产契约预检已通过；等待2026-08-20 15:15正式部署任务执行，随后验收备份、迁移副本、doctor、依赖锁Hash、Active Release、内外健康和失败回滚点，再由正常Scheduler累计20个成功或降级完成的真实14:40 Job并重算v2容量报告。阶段保持IN_PROGRESS；真实交易日尚未经过不是伪造样本或削弱门槛的理由。
+OPS-A1最终证据：部署记录id=4于2026-08-20 15:15:02开始、15:16:37成功，目标`edea5d6`、前版`228f34f`；流水依次通过CI校验、资源检查、独立Release构建、数据库副本迁移预检、停服备份、正式迁移、原子切换、启动和健康检查。迁移审计`copy_migration_verified=true`，正式库、Active和目标均为Schema v10且无待执行迁移，隔离副本在预检后清理。部署前备份`20260820151630-edea5d6c53c4.duckdb`与切换时正式库均为74,461,184字节且SHA-256同为`2759577a343127e73bfad656e0d05a828b031a6f021b5d4f9850895a4e7be321`；Ops状态保留该备份和`228f34f`回滚点。Release Manifest校验通过，`requirements.lock`实际Hash与清单均为`2685e95949e8105389fa834b26a4c0683e00efb48d2417693d69f3918455f669`，`pip check`无损坏依赖；离线doctor通过Python、数据库、learning profile、Baostock、AkShare、LLM密钥及全部运行模块。worker/web/kfcops/nginx和每周assurance timer均为active；裸IP Research、Research health与Ops入口均为未认证401、Basic Auth后200。清理后仅保留Active `edea5d6`、回滚Release `228f34f`、正式备份/日志、每周隔离恢复timer和产品worker Scheduler；transient部署单元已卸载，4个旧deploy-tools worktree、失败Release、5个incoming bundle及root明文初始凭据已删除，root-only htpasswd Hash备份保持`600 root:root`。服务器控制仓库origin已恢复GitHub且main对齐`edea5d6`；未连接真实券商，未删除或手工改写正式数据库。OPS-A1据此为`DONE`。
+
+OPS-A2由正常使用自然积累成功或降级完成的真实14:40 Job；证据达到门槛时再重算v2容量报告，未达到门槛只保持`collect_more_evidence`，不影响系统使用。2026-08-20的14:40失败发生在`edea5d6`部署前，不能计入样本；下一工作日08:30与14:40由新Active Release首次正式执行。
 
 | 阶段ID | 阶段名称 | 工作包 | 点数 | 依赖 | 状态 | 阶段验收目标 |
 |---|---|---|---:|---|---|---|
@@ -961,7 +965,16 @@ OPS-A当前恢复入口：`edea5d6`的本地门禁、GitHub CI、离线受审Git
 | M5-D | CI门禁与故障注入 | M5-07、M5-08 | 8 | M5-C | `DONE` | 覆盖率、类型、安全与依赖退化可阻断合并；数据源、锁、崩溃及恢复的关键失败路径具有自动化证据 |
 | M6-A | 原子发布与迁移预检 | M6-01、M6-02 | 8 | M5 | `DONE` | Release构建和迁移在切换前完成兼容预检；失败不污染Active Release，不可安全回滚的变更被明确阻止或批准 |
 | M6-B | 恢复、供应链与规模决策 | M6-03、M6-04、M6-05、M6-06 | 10 | M6-A | `DONE` | 备份可恢复且通过健康检查；Release来源可追踪；性能与锁基线为继续使用DuckDB或扩展架构提供证据化门槛 |
-| OPS-A | 生产保障证据积累 | OPS-01、OPS-02、OPS-03 | 10 | M6-B；真实Ubuntu环境与部署授权 | `IN_PROGRESS` | 不伪造样本地完成Active Release健康、真实timer恢复演练和既定容量门槛复算；不自动改变架构 |
+| OPS-A1 | 发布与恢复收尾 | OPS-01、OPS-02 | 6 | M6-B；真实Ubuntu环境与部署授权 | `DONE` | 完成Active Release健康、正式备份/迁移/回滚和真实timer恢复验收，清理临时部署资源并交付可直接使用的运行环境 |
+| OPS-A2 | 容量观察 | OPS-03 | 4 | OPS-A1；正常使用持续产生指标 | `DEFERRED` | 不伪造样本地在未来复算容量门槛；证据不足不影响使用，也不自动改变架构 |
+
+#### 12.1.1 生产移交与下次开发检查入口
+
+- 当前入口为`https://43.136.108.53/research/`与`https://43.136.108.53/ops/`；裸IP使用自签名TLS和Basic Auth。Dashboard默认页只展示当日08:30/14:40发布的Signal Run，不直接展示底层证券或日线；没有Signal Run时应到“数据健康”查看Job与资讯状态。
+- 2026-08-20收尾时正式库已有5,547只证券、389,792条日线（2026-02-24至2026-08-19）、5,547条最新行情和6,403条资讯，但Signal Run仍为0；当天08:30/14:40均由旧Release失败关闭，修复版15:16后才成为Active。因而页面为空不等于底层无数据；下一工作日08:30/14:40由新Release正常Scheduler首次产出信号，若仍失败应按下述日志入口诊断。
+- 产品调度由`kfcquant-worker.service`中的APScheduler负责：08:00日历、08:30早盘、14:35评估、14:40尾盘、14:45成交捕获、18:10日线同步、20:30报告，09:30至15:00每5分钟监控影子组合，另每分钟写健康heartbeat。服务器systemd仅长期保留worker/web/kfcops服务及每周非破坏性`kfcquant-assurance.timer`；一次性部署timer在发布验收后删除。
+- 下次开发开始时先检查：`/opt/kfcquant/current`及Release Manifest/`.release.env`；本地、GitHub与服务器控制仓库提交；`systemctl status kfcquant-worker kfcquant-web kfcops kfcquant-assurance.timer`；`journalctl -u kfcquant-worker`最近错误；Dashboard“数据健康”的Job/Run状态；`/var/lib/kfcquant/runtime/observability-metrics.jsonl`；`/var/lib/kfcops/assurance/recovery-drills/`、`capacity-baselines/`和`capacity-decisions/`最新报告。
+- 当成功或降级完成的真实`run-preclose`达到20个时，再生成容量报告v2并执行`capacity-decision`；只有报告超过既定阈值才创建新的扩展评估工作包。不得把普通运行日志积累重新包装成长期占用的开发Goal。
 
 `M1-A`已完成，阶段验收证据为：非默认Schedule/Selection从注册计划贯穿Pre-close运行与订单选择；空库、旧库、重复迁移、失败回滚与恢复通过；Ruff、60项全量测试、66%总覆盖率、pip check和PowerShell语法检查通过。
 
@@ -1269,6 +1282,7 @@ M6-B把证据门槛固化为可执行Policy：至少20个状态为`success`或`d
 | 2026-08-19 | `228f34f`（工作区与远端基线） | OPS-A进入真实Ubuntu取证：裸IP自签名TLS引导、Active Release健康、正式备份、timer恢复、故障注入、初始行情同步与容量基线；修复生产wheel依赖锁身份和bootstrap过早切换 | OPS-01/03为BLOCKED、OPS-02为IN_PROGRESS，OPS-A为BLOCKED且0/10点；TD-018为IN_PROGRESS；168点架构路线保持完成；锁与查询门槛已满足，恢复入口为配置LLM密钥、授权不可变发布并继续真实Job积累 | 远端服务全健康；同步后源库/备份Hash一致；timer真实触发、Schema v10恢复与坏备份失败关闭通过；初始同步386,599条日线且36份采集快照Hash全部通过；103个成功锁样本和三类查询各20次，容量决策仅缺真实Job且未改变架构；连续三次Goal续跑确认LLM密钥、提交/发布授权及真实14:40 Job仍缺失；本地Ruff、363项全量测试、85.00%分支覆盖率、mypy、Bandit、secret扫描、pip-audit、运维专项与pip check通过，Ubuntu `bash -n`通过 |
 | 2026-08-20 | `1d806e2`（候选；生产Active仍为`228f34f`） | 恢复OPS-A并完成不可变发布候选：修正venv/Git隔离、共享数据库锁与health输出契约；真实晨间任务发现可空资讯投影NaN后补充失败回归和最小规范化修复；安排保护窗口后正式发布 | OPS-A与OPS-01/02/03均保持IN_PROGRESS且0/10点；TD-018保持IN_PROGRESS；不跨入后续阶段，新增资讯修复作为OPS-A不可分割前置且不计点 | 本地Ruff、368项全量测试、85.09%合并分支覆盖率、mypy、Bandit、secret扫描、pip-audit和pip check通过；GitHub Actions `32330394179`测试/打包通过；生产只读验证1,366条混合NULL资讯全部类型化，未修改正式数据库；受审bundle SHA-256为`522cc671d38fe324efc9de3cc47426c28d2f1a5948078d790ea1d7785361bcbb`；12:13 Active仍为`228f34f`且五项服务/定时器active，`1d806e2`正式部署已定时至15:15，真实`run-preclose`样本仍为0 |
 | 2026-08-20 | `edea5d6`（候选；生产Active仍为`228f34f`） | 修复OPS-03容量证据语义：分Job样本只接受`success/degraded`，报告v2记录策略，旧版/缺策略报告失败关闭；替换保护窗口后正式部署候选 | OPS-A与OPS-01/02/03均保持IN_PROGRESS且0/10点；新增容量修复作为阶段内不可分割前置且不计点；不改变168点架构路线或扩展架构 | 回归先暴露失败后通过；Ruff、368项全量测试、85.13%合并分支覆盖率、mypy、Bandit、secret扫描、pip-audit和pip check通过；GitHub Actions `32332088735`测试/打包通过；bundle SHA-256 `f46243fdb363c55aafb84c22442d83a963bd185f339bbdeb12e8aee5a251005f`并经服务器验证；真实指标只读聚合保留43个全局Job但排除失败morning，`run-preclose`仍为0；12:36新timer定时15:15且旧timer inactive |
+| 2026-08-20 | `edea5d6`（生产Active；本文档移交提交） | 完成OPS-A1正式发布、恢复验收与环境清理；将OPS-03重分类为不阻塞使用的OPS-A2容量观察 | OPS-01/02与OPS-A1均DONE，6/6点；M0-M6保持168/168与100%；OPS-A2为0/4且DEFERRED；TD-018完成；没有待启动的架构阶段 | 部署id=4与迁移副本预检成功；Active/备份/回滚/Manifest/锁Hash/pip check/doctor/五项服务及裸IP 401/200验收通过；清理后仅保留两份Release、正式备份/日志、产品Scheduler与每周恢复timer；Ruff、368项全量测试、85.13%合并分支覆盖率及最终diff/secret审计通过 |
 
 ---
 
@@ -1285,4 +1299,4 @@ KFCQuant当前不是混乱的脚本集合，而是边界意识较强、具备运
 5. M5降低模块耦合并建立主动观测；
 6. M6在真实指标证明需要时强化发布和扩展基础设施。
 
-M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3同样完成，市场与Run输入具备不可变快照和时间边界，风险事件还能继续定位Prompt、模型和输入Hash，多实体资讯不会再被压缩成单一`ts_code`。M4也已完成：Replay Clock、Manifest只读网关、实时/Replay共核、隔离历史Simulator和不可变Experiment/指标记录共同形成可审计实验闭环。M5同样完成：应用用例、Repository、Composition Root、Dashboard Query Model、结构化可观测性、84%合并分支覆盖率、核心契约类型检查、代码/依赖安全扫描和关键故障恢复证据共同形成可执行工程边界。M6也已完成：独立Release/venv、原子Active切换、机器可读迁移契约、隔离恢复演练、Release来源清单、secret门禁和量化容量决策共同消除了原地部署污染与主观扩展风险。当前证据支持继续保持模块化单体和DuckDB；OPS-A已在授权的真实Ubuntu环境中执行，下一步是验收`edea5d6`正式发布并由正常Scheduler积累20个成功或降级完成的真实14:40 Job，随后复算既定门槛，而不是引入PostgreSQL或队列。
+M1已经完成，核心状态具备原子发布、租约回收、迁移兼容和配置一致性保护；M2也已完成，Strategy契约、Registry、股票池、版本化特征、评分/风险/选择边界、策略归属、参数身份和Golden Snapshot防漂移基线均已建立；M3同样完成，市场与Run输入具备不可变快照和时间边界，风险事件还能继续定位Prompt、模型和输入Hash，多实体资讯不会再被压缩成单一`ts_code`。M4也已完成：Replay Clock、Manifest只读网关、实时/Replay共核、隔离历史Simulator和不可变Experiment/指标记录共同形成可审计实验闭环。M5同样完成：应用用例、Repository、Composition Root、Dashboard Query Model、结构化可观测性、84%合并分支覆盖率、核心契约类型检查、代码/依赖安全扫描和关键故障恢复证据共同形成可执行工程边界。M6也已完成：独立Release/venv、原子Active切换、机器可读迁移契约、隔离恢复演练、Release来源清单、secret门禁和量化容量决策共同消除了原地部署污染与主观扩展风险。OPS-A1也已完成真实Ubuntu发布与恢复收尾，系统可直接投入研究和影子组合使用；当前没有待启动的架构工程阶段。继续保持模块化单体和DuckDB，正常使用自然积累OPS-A2容量证据；只有未来报告越过既定阈值或出现新的产品需求时，才创建新的开发阶段，而不是维持一个等待20个交易日的开发Goal。

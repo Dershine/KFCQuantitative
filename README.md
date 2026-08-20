@@ -239,6 +239,17 @@ CI同时对Research与Operations执行84%分支覆盖率门禁。类型检查覆
 - `/opt/kfcquant/current`原子指向Active Release，systemd和管理员命令只通过该链接运行；
 - 数据、报告和备份存放在`/var/lib/kfcquant/`，不会被Git更新覆盖。
 
+### 首次使用与页面数据
+
+Research首页的“今日候选”只展示当天已经成功发布的08:30盘前Signal Run和14:40尾盘Signal Run，不是证券或日线浏览器。首次部署后即使`securities`、`daily_bars`和资讯表已有数据，只要当天信号尚未到触发时间或对应Job失败，候选、订单、持仓和报告页仍会显示为空；可先到“数据健康”查看Job、Signal Run和资讯处理状态。正常工作日时间线为：
+
+- 08:00同步交易日历，08:30生成盘前观察，14:35前向评估；
+- 14:40生成尾盘候选，14:45捕获影子成交；
+- 18:10同步当日日线，20:30生成收盘报告；
+- 09:30至15:00每5分钟监控影子组合，worker每分钟写一次健康heartbeat。
+
+这些任务由持续运行的`kfcquant-worker`内部Scheduler管理，不会为每个时刻安装一个systemd timer。服务器长期systemd timer只有每周隔离恢复演练；发布过程中创建的一次性部署timer应在验收后清理。系统只运行研究与影子组合，不连接真实券商。
+
 服务器需要Python 3.12或更高版本。生产依赖固定在`requirements.lock`；GitHub Actions会在Python 3.12上安装锁定依赖、执行Ruff和Pytest，并保存wheel构建产物。
 
 ### 首次初始化服务器
@@ -341,7 +352,7 @@ sudo journalctl -u kfcquant-assurance.service -n 100
 sudo -u kfcops bash -c 'set -a; source /etc/kfcquant/ops.env; set +a; /opt/kfcquant/current/.venv/bin/kfcops capacity-baseline --json'
 ```
 
-报告位于`/var/lib/kfcops/assurance/capacity-baselines/`。扩展判定至少要求20个状态为`success`或`degraded`的14:40 Job、100个成功锁等待、每类20个查询和一次成功恢复；失败、错过或缺少状态标签的Job仍保留在全局运行指标中，但不会计入分Job容量样本。旧版或缺少样本策略标识的报告失败关闭为`collect_more_evidence`，不会据此引入PostgreSQL或任务队列。对某份报告复算：
+报告位于`/var/lib/kfcops/assurance/capacity-baselines/`。扩展判定至少要求20个状态为`success`或`degraded`的14:40 Job、100个成功锁等待、每类20个查询和一次成功恢复；失败、错过或缺少状态标签的Job仍保留在全局运行指标中，但不会计入分Job容量样本。该门槛只用于将来判断是否需要扩展存储或调度架构，不阻止当前Release部署、Research页面使用或影子组合运行。旧版或缺少样本策略标识的报告失败关闭为`collect_more_evidence`，不会据此引入PostgreSQL或任务队列。对某份报告复算：
 
 ```bash
 sudo -u kfcops bash -c 'set -a; source /etc/kfcquant/ops.env; set +a; /opt/kfcquant/current/.venv/bin/kfcops capacity-decision /var/lib/kfcops/assurance/capacity-baselines/<报告>.json --json'
