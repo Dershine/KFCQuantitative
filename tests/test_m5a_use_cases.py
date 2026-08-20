@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from time import sleep
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -60,6 +61,46 @@ def test_news_synchronizer_converts_construction_failure_to_unhealthy_result():
     assert not result.official_healthy
     assert not result.mainstream_healthy
     assert result.messages == ["provider unavailable"]
+
+
+def test_news_synchronizer_renews_job_lease_while_news_sync_is_blocked():
+    service = Mock()
+
+    def slow_sync(start, end):
+        sleep(0.04)
+        return NewsSyncResult(True, True, 0, 0, 0, 0, [])
+
+    service.sync.side_effect = slow_sync
+    heartbeat = Mock()
+
+    result = NewsSynchronizer(lambda: service).sync(
+        AT,
+        AT,
+        heartbeat=heartbeat,
+        heartbeat_interval_seconds=0.01,
+    )
+
+    assert result.official_healthy
+    assert heartbeat.call_count >= 2
+
+
+def test_news_synchronizer_fails_closed_when_background_lease_renewal_fails():
+    service = Mock()
+
+    def slow_sync(start, end):
+        sleep(0.04)
+        return NewsSyncResult(True, True, 0, 0, 0, 0, [])
+
+    service.sync.side_effect = slow_sync
+    heartbeat = Mock(side_effect=[None, JobLeaseLostError("lease expired")])
+
+    with pytest.raises(JobLeaseLostError, match="lease expired"):
+        NewsSynchronizer(lambda: service).sync(
+            AT,
+            AT,
+            heartbeat=heartbeat,
+            heartbeat_interval_seconds=0.01,
+        )
 
 
 def test_calendar_use_case_has_an_independent_repository_boundary():
@@ -151,6 +192,9 @@ def test_evaluation_and_postclose_use_cases_coordinate_only_their_collaborators(
     assert content == "# report"
     report.generate.assert_called_once()
     evaluation.evaluate.assert_not_called()
+    sync_kwargs = news.sync.call_args.kwargs
+    assert callable(sync_kwargs["heartbeat"])
+    assert 0 < sync_kwargs["heartbeat_interval_seconds"] < settings.job_lease_seconds
 
 
 def test_recover_expired_jobs_uses_injected_clock_when_time_is_omitted():

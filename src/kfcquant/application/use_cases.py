@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from sys import version as PYTHON_VERSION
 from sys import version_info as PYTHON_VERSION_INFO
+from threading import Event, Thread
 from typing import Any
 from uuid import uuid4
 
@@ -41,6 +42,10 @@ MINIMUM_PYTHON_VERSION = (3, 12)
 def validated_market_frame(schema: MarketTableSchema, frame: pd.DataFrame) -> pd.DataFrame:
     """Recheck injected and production providers at the application trust boundary."""
     return schema.validate(frame).frame
+
+
+def _lease_heartbeat_interval_seconds(settings: Settings) -> float:
+    return max(1.0, min(30.0, settings.job_lease_seconds / 3))
 
 
 class JobController:
@@ -193,12 +198,45 @@ class NewsSynchronizer:
     ):
         self.service_factory = service_factory
 
-    def sync(self, start: datetime, end: datetime) -> NewsSyncResult:
+    def sync(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        heartbeat: Callable[[], object] | None = None,
+        heartbeat_interval_seconds: float = 30.0,
+    ) -> NewsSyncResult:
         try:
             service = self.service_factory()
         except Exception as exc:
             return NewsSyncResult(False, False, 0, 0, 0, 0, [str(exc)])
-        return service.sync(start, end)
+        if heartbeat is None:
+            return service.sync(start, end)
+        if heartbeat_interval_seconds <= 0:
+            raise ValueError("heartbeat_interval_seconds must be positive")
+
+        stopped = Event()
+        failures: list[Exception] = []
+
+        def renew_lease() -> None:
+            while not stopped.wait(heartbeat_interval_seconds):
+                try:
+                    heartbeat()
+                except Exception as exc:
+                    failures.append(exc)
+                    return
+
+        heartbeat()
+        thread = Thread(target=renew_lease, name="news-job-lease-heartbeat", daemon=True)
+        thread.start()
+        try:
+            result = service.sync(start, end)
+        finally:
+            stopped.set()
+            thread.join()
+        if failures:
+            raise failures[0]
+        return result
 
 
 class RunManifestFactory:
@@ -540,7 +578,12 @@ class RunPrecloseUseCase:
                     stage="preclose.quote-quality",
                 )
             news_fetch_start = datetime.combine((as_of - timedelta(days=10)).date(), time(0), tzinfo=SHANGHAI_TZ)
-            news = self.news.sync(news_fetch_start, as_of)
+            news = self.news.sync(
+                news_fetch_start,
+                as_of,
+                heartbeat=lambda: self.jobs.heartbeat(job_id),
+                heartbeat_interval_seconds=_lease_heartbeat_interval_seconds(self.settings),
+            )
             self.jobs.heartbeat(job_id)
             bars = self.repository.get_recent_daily_bars(150, as_of=as_of.date() - timedelta(days=1))
             expected_eod = self.repository.previous_trading_day(as_of.date())
@@ -763,7 +806,12 @@ class RunMorningUseCase:
                 tradable=False,
             ).transition_to(ResearchRunState.COLLECTING_DATA)
             news_start = datetime.combine((as_of - timedelta(days=10)).date(), time(0), tzinfo=SHANGHAI_TZ)
-            news = self.news.sync(news_start, as_of)
+            news = self.news.sync(
+                news_start,
+                as_of,
+                heartbeat=lambda: self.jobs.heartbeat(job_id),
+                heartbeat_interval_seconds=_lease_heartbeat_interval_seconds(self.settings),
+            )
             self.jobs.heartbeat(job_id)
             bars = self.repository.get_recent_daily_bars(150, as_of=as_of.date() - timedelta(days=1))
             expected_eod = self.repository.previous_trading_day(as_of.date())
@@ -1021,7 +1069,12 @@ class RunPostcloseUseCase:
                 at.date(), self.settings.schedule.preclose_run_at, tzinfo=SHANGHAI_TZ
             )
             news_start = datetime.combine((at - timedelta(days=10)).date(), time(0), tzinfo=SHANGHAI_TZ)
-            news = self.news.sync(news_start, at)
+            news = self.news.sync(
+                news_start,
+                at,
+                heartbeat=lambda: self.jobs.heartbeat(job_id),
+                heartbeat_interval_seconds=_lease_heartbeat_interval_seconds(self.settings),
+            )
             self.jobs.heartbeat(job_id)
             self.evaluate_morning.execute(at)
             self.evaluate_previous_preclose.execute(at)
