@@ -39,6 +39,7 @@ def test_dashboard_query_model_returns_stable_empty_projections_without_writing(
 
     assert isinstance(queries, DashboardQueryModel)
     assert queries.latest_signal(SignalKind.MORNING_WATCHLIST) is None
+    assert queries.latest_job("run-preclose") is None
     assert queries.risk_events([]).empty
     assert queries.portfolio().cash == settings.initial_cash
     assert queries.portfolio().positions.empty
@@ -199,6 +200,7 @@ def test_dashboard_query_model_projects_cross_context_views_behind_explicit_meth
     assert evaluations.preclose_candidates.empty
     assert evaluations.opportunities["position_id"].tolist() == [position.position_id]
     assert health.jobs["job_run_id"].tolist() == ["dashboard-job"]
+    assert queries.latest_job("run-preclose", at.date())["job_run_id"] == "dashboard-job"
     assert health.news_status_counts.to_dict("records") == [{"status": "pending", "count": 1}]
     assert queries.risk_events([event.event_id])["event_id"].tolist() == [event.event_id]
     assert report is not None and report["report_id"] == "dashboard-report"

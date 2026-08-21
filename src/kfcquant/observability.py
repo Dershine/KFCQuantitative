@@ -41,6 +41,7 @@ class AlertCode(StrEnum):
     PRECLOSE_RUN_FAILED = "preclose_run_failed"
     OFFICIAL_NEWS_UNHEALTHY = "official_news_unhealthy"
     OFFICIAL_NEWS_BACKLOG = "official_news_backlog"
+    QUOTE_DATA_FUTURE = "quote_data_future"
     QUOTE_DATA_STALE = "quote_data_stale"
     EOD_DATA_STALE = "eod_data_stale"
     DATABASE_LOCK_TIMEOUT = "database_lock_timeout"

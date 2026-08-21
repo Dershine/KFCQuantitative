@@ -61,12 +61,18 @@ class JobController:
         self.clock = clock
         self.observability = observability or get_observability()
         self._contexts: dict[str, Any] = {}
-        self._jobs: dict[str, tuple[str, datetime]] = {}
+        self._jobs: dict[str, tuple[str, datetime, datetime | None]] = {}
 
-    def start(self, name: str, at: datetime) -> str:
+    def start(self, name: str, at: datetime, scheduled_for: datetime | None = None) -> str:
         job_id = str(uuid4())
-        self.repository.start_job(job_id, name, at, timedelta(seconds=self.settings.job_lease_seconds))
-        self._jobs[job_id] = (name, at)
+        self.repository.start_job(
+            job_id,
+            name,
+            at,
+            timedelta(seconds=self.settings.job_lease_seconds),
+            scheduled_for=scheduled_for,
+        )
+        self._jobs[job_id] = (name, at, scheduled_for)
         self._contexts[job_id] = self.observability.begin_context(job_run_id=job_id, stage=name)
         self.observability.event("job_started", job_name=name, started_at=at)
         return job_id
@@ -85,7 +91,7 @@ class JobController:
     def finish(self, job_id: str, status: str, message: str, **metadata: Any) -> None:
         finished_at = self.heartbeat(job_id)
         self.repository.finish_job(job_id, finished_at, status, message, metadata)
-        job_name, started = self._jobs.get(job_id, ("unknown", finished_at))
+        job_name, started, _ = self._jobs.get(job_id, ("unknown", finished_at, None))
         self._record_completion(job_id, job_name, started, finished_at, status, message, metadata)
 
     def completion(
@@ -105,6 +111,7 @@ class JobController:
             finished_at=finished_at,
             status=status,
             message=message,
+            scheduled_for=self._jobs.get(job_id, (name, started, None))[2],
             metadata=metadata,
         )
         self._close_context(job_id)
@@ -507,17 +514,23 @@ class RunPrecloseUseCase:
         self.observability = observability or get_observability()
 
     def execute(self, as_of: datetime | None = None, research_outside_window: bool = False) -> SignalRun:
-        as_of = as_of or self.clock.now()
-        if as_of.tzinfo is None:
-            as_of = as_of.replace(tzinfo=SHANGHAI_TZ)
+        explicit_as_of = as_of is not None
+        triggered_at = as_of or self.clock.now()
+        if triggered_at.tzinfo is None:
+            triggered_at = triggered_at.replace(tzinfo=SHANGHAI_TZ)
         strategy = self.strategy_registry.resolve(SignalKind.PRECLOSE_ENTRY)
         started = self.clock.now()
-        job_id = self.jobs.start("run-preclose", started)
-        window_ok = self.settings.schedule.preclose_window.contains(as_of)
-        if not self.repository.is_trading_day(as_of.date()):
+        scheduled_for = datetime.combine(
+            triggered_at.date(),
+            self.settings.schedule.preclose_run_at,
+            tzinfo=SHANGHAI_TZ,
+        )
+        job_id = self.jobs.start("run-preclose", started, scheduled_for=scheduled_for)
+        window_ok = self.settings.schedule.preclose_window.contains(triggered_at)
+        if not self.repository.is_trading_day(triggered_at.date()):
             return self._missed(
                 strategy,
-                as_of,
+                triggered_at,
                 job_id,
                 started,
                 "交易日历未确认当日开市，禁止生成尾盘信号",
@@ -525,17 +538,79 @@ class RunPrecloseUseCase:
         if not window_ok and not research_outside_window:
             return self._missed(
                 strategy,
-                as_of,
+                triggered_at,
                 job_id,
                 started,
                 f"不在{self.settings.schedule.preclose_window.describe()}窗口内，禁止补造尾盘信号",
             )
         try:
+            signal_run_id = str(uuid4())
+            quotes = validated_market_frame(LIVE_QUOTE_SCHEMA, self.live_provider.fetch_quotes())
+            self.jobs.heartbeat(job_id)
+            # Explicit as_of values define deterministic replay boundaries. A live
+            # invocation freezes its boundary only after the quote response arrives.
+            information_cutoff = triggered_at if explicit_as_of else self.clock.now()
+            if (
+                not explicit_as_of
+                and not research_outside_window
+                and not self.settings.schedule.preclose_window.contains(information_cutoff)
+            ):
+                return self._missed(
+                    strategy,
+                    information_cutoff,
+                    job_id,
+                    started,
+                    f"实时行情采集完成时已超过{self.settings.schedule.preclose_window.describe()}窗口",
+                )
+            quote_times = (
+                pd.to_datetime(quotes["captured_at"], utc=True)
+                if not quotes.empty
+                else pd.Series(dtype="datetime64[ns, UTC]")
+            )
+            cutoff_utc = pd.Timestamp(information_cutoff).tz_convert("UTC")
+            quote_ages = (cutoff_utc - quote_times).dt.total_seconds()
+            if not quote_times.empty:
+                self.observability.metric(
+                    MetricName.QUOTE_AGE_SECONDS,
+                    float(quote_ages.min()),
+                    unit="seconds",
+                    signal_run_id=signal_run_id,
+                    strategy_id=strategy.identity.strategy_id,
+                    strategy_version=strategy.identity.version,
+                    information_cutoff=information_cutoff,
+                    stage="preclose.quote-quality",
+                )
+            if not quote_ages.empty and bool((quote_ages < 0).any()):
+                self.observability.alert(
+                    AlertCode.QUOTE_DATA_FUTURE,
+                    "pre-close live quote batch is after its frozen information boundary",
+                    dedup_key=information_cutoff.date().isoformat(),
+                    signal_run_id=signal_run_id,
+                    strategy_id=strategy.identity.strategy_id,
+                    strategy_version=strategy.identity.version,
+                    information_cutoff=information_cutoff,
+                    stage="preclose.quote-quality",
+                )
+            # Fail before persistence, news synchronization, or LLM work when the
+            # quote batch can never satisfy the point-in-time contract.
+            self.point_in_time.validate_strategy_inputs(
+                as_of=information_cutoff,
+                information_cutoff=information_cutoff,
+                securities=pd.DataFrame(),
+                bars=pd.DataFrame(),
+                quotes=quotes,
+                risk_events=pd.DataFrame(),
+            )
+            quote_manifest = self.ingestor.ingest(LIVE_QUOTE_SCHEMA, quotes, self.live_provider, job_id)
+            data_fresh = not quotes.empty and bool(
+                ((quote_ages >= 0) & (quote_ages <= self.settings.quote_freshness_seconds)).all()
+            )
             draft = SignalRun(
                 **strategy.identity.attribution_fields(),
-                as_of=as_of,
+                run_id=signal_run_id,
+                as_of=information_cutoff,
                 signal_kind=SignalKind.PRECLOSE_ENTRY,
-                information_cutoff=as_of,
+                information_cutoff=information_cutoff,
                 status=RunStatus.RUNNING,
                 lifecycle_state=ResearchRunState.CREATED,
                 data_fresh=False,
@@ -543,89 +618,90 @@ class RunPrecloseUseCase:
                 mainstream_news_healthy=False,
                 tradable=False,
             ).transition_to(ResearchRunState.COLLECTING_DATA)
-            quotes = validated_market_frame(LIVE_QUOTE_SCHEMA, self.live_provider.fetch_quotes())
-            self.jobs.heartbeat(job_id)
-            quote_manifest = self.ingestor.ingest(LIVE_QUOTE_SCHEMA, quotes, self.live_provider, job_id)
-            quote_times = (
-                pd.to_datetime(quotes["captured_at"], utc=True)
-                if not quotes.empty
-                else pd.Series(dtype="datetime64[ns, UTC]")
-            )
-            as_of_utc = pd.Timestamp(as_of).tz_convert("UTC")
-            data_fresh = not quotes.empty and bool(
-                ((as_of_utc - quote_times).abs().dt.total_seconds() <= self.settings.quote_freshness_seconds).all()
-            )
             if not data_fresh:
                 self.observability.alert(
                     AlertCode.QUOTE_DATA_STALE,
                     "pre-close live quote batch is missing or stale",
-                    dedup_key=as_of.date().isoformat(),
+                    dedup_key=information_cutoff.date().isoformat(),
                     signal_run_id=draft.run_id,
                     strategy_id=strategy.identity.strategy_id,
                     strategy_version=strategy.identity.version,
-                    information_cutoff=as_of,
+                    information_cutoff=information_cutoff,
                     stage="preclose.quote-quality",
                 )
-            if not quote_times.empty:
-                self.observability.metric(
-                    MetricName.QUOTE_AGE_SECONDS,
-                    float((as_of_utc - quote_times.max()).total_seconds()),
-                    unit="seconds",
-                    signal_run_id=draft.run_id,
-                    strategy_id=strategy.identity.strategy_id,
-                    strategy_version=strategy.identity.version,
-                    information_cutoff=as_of,
-                    stage="preclose.quote-quality",
-                )
-            news_fetch_start = datetime.combine((as_of - timedelta(days=10)).date(), time(0), tzinfo=SHANGHAI_TZ)
+            news_fetch_start = datetime.combine(
+                (information_cutoff - timedelta(days=10)).date(),
+                time(0),
+                tzinfo=SHANGHAI_TZ,
+            )
             news = self.news.sync(
                 news_fetch_start,
-                as_of,
+                information_cutoff,
                 heartbeat=lambda: self.jobs.heartbeat(job_id),
                 heartbeat_interval_seconds=_lease_heartbeat_interval_seconds(self.settings),
             )
             self.jobs.heartbeat(job_id)
-            bars = self.repository.get_recent_daily_bars(150, as_of=as_of.date() - timedelta(days=1))
-            expected_eod = self.repository.previous_trading_day(as_of.date())
+            bars = self.repository.get_recent_daily_bars(
+                150,
+                as_of=information_cutoff.date() - timedelta(days=1),
+            )
+            expected_eod = self.repository.previous_trading_day(information_cutoff.date())
             latest_eod = pd.to_datetime(bars["trade_date"], errors="coerce").max() if not bars.empty else pd.NaT
             eod_fresh = bool(expected_eod and not pd.isna(latest_eod) and latest_eod.date() == expected_eod)
             if not eod_fresh:
                 self.observability.alert(
                     AlertCode.EOD_DATA_STALE,
                     "official EOD data is not current for the pre-close Signal Run",
-                    dedup_key=as_of.date().isoformat(),
+                    dedup_key=information_cutoff.date().isoformat(),
                     signal_run_id=draft.run_id,
                     strategy_id=strategy.identity.strategy_id,
                     strategy_version=strategy.identity.version,
-                    information_cutoff=as_of,
+                    information_cutoff=information_cutoff,
                     stage="preclose.eod-quality",
                 )
             if not pd.isna(latest_eod):
                 self.observability.metric(
                     MetricName.LATEST_EOD_LAG_DAYS,
-                    (as_of.date() - latest_eod.date()).days,
+                    (information_cutoff.date() - latest_eod.date()).days,
                     unit="days",
                     signal_run_id=draft.run_id,
                     strategy_id=strategy.identity.strategy_id,
                     strategy_version=strategy.identity.version,
-                    information_cutoff=as_of,
+                    information_cutoff=information_cutoff,
                     stage="preclose.eod-quality",
                 )
             risk_start_date = self.repository.trading_day_lookback(
-                as_of.date(), self.settings.news_lookback_trading_days
-            ) or (as_of.date() - timedelta(days=10))
+                information_cutoff.date(), self.settings.news_lookback_trading_days
+            ) or (information_cutoff.date() - timedelta(days=10))
             risk_start = datetime.combine(risk_start_date, time(0), tzinfo=SHANGHAI_TZ)
-            events = self.repository.get_risk_events(risk_start, as_of)
-            unprocessed = self.repository.unprocessed_official_codes(risk_start, as_of)
+            events = self.repository.get_risk_events(risk_start, information_cutoff)
+            unprocessed = self.repository.unprocessed_official_codes(risk_start, information_cutoff)
+            evaluation_at = information_cutoff if explicit_as_of else self.clock.now()
+            if (
+                not explicit_as_of
+                and not research_outside_window
+                and not self.settings.schedule.preclose_window.contains(evaluation_at)
+            ):
+                return self._missed(
+                    strategy,
+                    evaluation_at,
+                    job_id,
+                    started,
+                    f"输入准备完成时已超过{self.settings.schedule.preclose_window.describe()}窗口",
+                )
             provisional = draft.model_copy(
                 update={
-                    "data_as_of": as_of if data_fresh else None,
+                    "as_of": evaluation_at,
+                    "data_as_of": information_cutoff if data_fresh else None,
                     "data_fresh": data_fresh,
                     "official_news_healthy": news.official_healthy,
                     "mainstream_news_healthy": news.mainstream_healthy,
                 }
             ).transition_to(ResearchRunState.EVALUATING)
-            morning_run = self.repository.latest_signal_run(as_of.date(), SignalKind.MORNING_WATCHLIST.value)
+            morning_run = self.repository.latest_signal_run(
+                information_cutoff.date(),
+                SignalKind.MORNING_WATCHLIST.value,
+            )
             morning_codes: set[str] = set()
             morning_as_of: datetime | None = None
             if morning_run:
@@ -637,8 +713,8 @@ class RunPrecloseUseCase:
             point_in_time = self.point_in_time.build_context(
                 run_id=provisional.run_id,
                 signal_kind=SignalKind.PRECLOSE_ENTRY,
-                as_of=as_of,
-                information_cutoff=provisional.information_cutoff or as_of,
+                as_of=evaluation_at,
+                information_cutoff=provisional.information_cutoff or information_cutoff,
                 securities=self.repository.get_securities(),
                 bars=bars,
                 quotes=quotes,
@@ -651,8 +727,25 @@ class RunPrecloseUseCase:
             execution = self.strategy_runner.execute(point_in_time.context, expected_identity=strategy.identity)
             scored = execution.result
             self.jobs.heartbeat(job_id)
+            publish_at = information_cutoff if explicit_as_of else self.clock.now()
+            publish_window_ok = self.settings.schedule.preclose_window.contains(publish_at)
+            if not publish_window_ok and not research_outside_window:
+                return self._missed(
+                    strategy,
+                    publish_at,
+                    job_id,
+                    started,
+                    f"策略计算完成时已超过{self.settings.schedule.preclose_window.describe()}窗口",
+                )
             selected = self.settings.selection.select_candidates(scored.candidates)
-            tradable = window_ok and data_fresh and eod_fresh and news.official_healthy and bool(selected)
+            tradable = (
+                window_ok
+                and publish_window_ok
+                and data_fresh
+                and eod_fresh
+                and news.official_healthy
+                and bool(selected)
+            )
             status = RunStatus.SUCCESS if tradable and news.mainstream_healthy else RunStatus.DEGRADED
             messages = list(news.messages)
             if not data_fresh:

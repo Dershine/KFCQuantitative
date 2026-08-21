@@ -7,6 +7,7 @@ import pytest
 
 from kfcquant.config import SHANGHAI_TZ
 from kfcquant.db import Database
+from kfcquant.observability import AlertCode, MemoryObservabilitySink, Observability
 from kfcquant.run_manifest import RunInputKind
 from kfcquant.services.workflow import Workflow
 from tests.conftest import make_daily, make_quotes, make_securities
@@ -31,6 +32,29 @@ class FakeLive:
 
     def fetch_intraday_bars(self, ts_code, start, end, frequency_minutes=5):
         return []
+
+
+class MutableClock:
+    def __init__(self, current: datetime):
+        self.current = current
+
+    def now(self) -> datetime:
+        return self.current
+
+    def advance(self, seconds: int) -> None:
+        self.current += timedelta(seconds=seconds)
+
+
+class DelayedLive(FakeLive):
+    def __init__(self, codes: list[str], clock: MutableClock, delay_seconds: int):
+        super().__init__(pd.DataFrame())
+        self.codes = codes
+        self.clock = clock
+        self.delay_seconds = delay_seconds
+
+    def fetch_quotes(self, ts_codes=None):
+        self.clock.advance(self.delay_seconds)
+        return make_quotes(self.codes, self.clock.now())
 
 
 class FakeLLM:
@@ -121,12 +145,18 @@ def test_preclose_future_quote_fails_before_strategy_and_never_publishes_or_orde
     )
     database.upsert_securities(make_securities([(code, code)]))
     database.upsert_daily_bars(make_daily([code], at))
+    class NewsMustNotRun(FakeMarket):
+        def fetch_official_documents(self, start, end):
+            raise AssertionError("news synchronization must not run for a future quote batch")
+
+    sink = MemoryObservabilitySink()
     workflow = Workflow(
         settings,
         database=database,
-        market_provider=FakeMarket(),
+        market_provider=NewsMustNotRun(),
         live_provider=FakeLive(make_quotes([code], at + timedelta(seconds=1))),
         llm_provider=FakeLLM(),
+        observability=Observability((sink,)),
     )
 
     with pytest.raises(ValueError, match="live_quote.*information_cutoff"):
@@ -135,7 +165,73 @@ def test_preclose_future_quote_fails_before_strategy_and_never_publishes_or_orde
     assert database.latest_signal_run(include_non_terminal=True) is None
     assert database.table("run_manifests").empty
     assert database.table("paper_orders").empty
+    assert database.get_latest_quotes().empty
     assert database.latest_job("run-preclose")["status"] == "failed"
+    assert any(
+        record.get("alert_code") == AlertCode.QUOTE_DATA_FUTURE.value
+        for record in sink.records
+    )
+
+
+def test_live_preclose_freezes_cutoff_after_delayed_quote_observation(settings):
+    triggered_at = datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ)
+    code = "600000.SH"
+    clock = MutableClock(triggered_at)
+    database = Database(settings.database_path, settings.initial_cash)
+    database.initialize()
+    database.upsert_trade_calendar(
+        pd.DataFrame(
+            [{"cal_date": triggered_at.date(), "is_open": True, "pretrade_date": date(2026, 8, 7)}]
+        )
+    )
+    database.upsert_securities(make_securities([(code, code)]))
+    database.upsert_daily_bars(make_daily([code], triggered_at))
+    workflow = Workflow(
+        settings,
+        database=database,
+        market_provider=FakeMarket(),
+        live_provider=DelayedLive([code], clock, delay_seconds=30),
+        llm_provider=FakeLLM(),
+        clock=clock,
+    )
+
+    run = workflow.run_preclose()
+
+    observed_at = triggered_at + timedelta(seconds=30)
+    assert run.information_cutoff == observed_at
+    assert run.as_of == observed_at
+    assert run.data_as_of == observed_at
+    assert run.tradable
+    job = database.latest_job("run-preclose")
+    assert job["scheduled_for"] == triggered_at
+    assert job["status"] == "success"
+
+
+def test_live_preclose_marks_run_missed_when_quote_collection_exceeds_window(settings):
+    triggered_at = datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI_TZ)
+    code = "600000.SH"
+    clock = MutableClock(triggered_at)
+    database = Database(settings.database_path, settings.initial_cash)
+    database.initialize()
+    database.upsert_trade_calendar(
+        pd.DataFrame(
+            [{"cal_date": triggered_at.date(), "is_open": True, "pretrade_date": date(2026, 8, 7)}]
+        )
+    )
+    workflow = Workflow(
+        settings,
+        database=database,
+        market_provider=FakeMarket(),
+        live_provider=DelayedLive([code], clock, delay_seconds=181),
+        llm_provider=FakeLLM(),
+        clock=clock,
+    )
+
+    run = workflow.run_preclose()
+
+    assert run.status.value == "missed"
+    assert "实时行情采集完成时已超过" in run.message
+    assert database.table("paper_orders").empty
 
 
 def test_preclose_outside_window_is_recorded_missed(settings):

@@ -1925,9 +1925,16 @@ class Database:
             ).fetchdf()
         return self._decode_strategy_frame(frame)
 
-    def latest_job(self, job_name: str | None = None) -> dict[str, Any] | None:
-        where = "WHERE job_name=?" if job_name else ""
-        params = [job_name] if job_name else []
+    def latest_job(self, job_name: str | None = None, on_date: date | None = None) -> dict[str, Any] | None:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if job_name:
+            clauses.append("job_name=?")
+            params.append(job_name)
+        if on_date:
+            clauses.append("CAST(started_at AS DATE)=?")
+            params.append(on_date)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self.connect(read_only=True) as connection:
             row = connection.execute(
                 f"SELECT * FROM job_runs {where} ORDER BY started_at DESC LIMIT 1", params

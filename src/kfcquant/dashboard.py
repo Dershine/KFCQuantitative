@@ -40,20 +40,42 @@ def safe_read(operation, default):
 tabs = st.tabs(["今日候选", "候选详情", "影子组合", "交易记录", "前向评估", "数据健康", "收盘报告"])
 
 with tabs[0]:
-    for title, kind in (
-        (f"{settings.schedule.morning_run_at:%H:%M} 盘前观察名单", SignalKind.MORNING_WATCHLIST),
-        (f"{settings.schedule.preclose_run_at:%H:%M} 尾盘入场候选", SignalKind.PRECLOSE_ENTRY),
+    today = datetime.now(SHANGHAI_TZ).date()
+    for title, kind, job_name in (
+        (
+            f"{settings.schedule.morning_run_at:%H:%M} 盘前观察名单",
+            SignalKind.MORNING_WATCHLIST,
+            "run-morning",
+        ),
+        (
+            f"{settings.schedule.preclose_run_at:%H:%M} 尾盘入场候选",
+            SignalKind.PRECLOSE_ENTRY,
+            "run-preclose",
+        ),
     ):
         st.subheader(title)
         signal = safe_read(
             lambda signal_kind=kind: query_model.latest_signal(
                 signal_kind,
-                datetime.now(SHANGHAI_TZ).date(),
+                today,
             ),
             None,
         )
         if signal is None:
-            st.info(f"今天尚未运行{title[:5]}信号。")
+            job = safe_read(
+                lambda current_job=job_name: query_model.latest_job(current_job, today),
+                None,
+            )
+            if job and job["status"] == "failed":
+                st.error(
+                    f"今天的{title}运行失败（{job['finished_at'] or job['started_at']}）：{job['message']}"
+                )
+            elif job and job["status"] == "missed":
+                st.warning(f"今天的{title}已错过：{job['message']}")
+            elif job and job["status"] == "running":
+                st.warning(f"今天的{title}正在运行，开始时间：{job['started_at']}")
+            else:
+                st.info(f"今天尚未运行{title[:5]}信号。")
             continue
         run = signal.run
         status_cols = st.columns(5)

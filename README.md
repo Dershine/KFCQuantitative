@@ -250,6 +250,8 @@ Research首页的“今日候选”只展示当天已经成功发布的08:30盘�
 
 这些任务由持续运行的`kfcquant-worker`内部Scheduler管理，不会为每个时刻安装一个systemd timer。服务器长期systemd timer只有每周隔离恢复演练；发布过程中创建的一次性部署timer应在验收后清理。系统只运行研究与影子组合，不连接真实券商。
 
+首页会区分“尚未触发”“运行中”“失败”“错过窗口”和“成功但零候选”，不会把关键Job失败显示成普通空列表。实时尾盘运行以计划时刻记录`scheduled_for`，在行情响应返回后冻结本次`information_cutoff`；报价原始时间不会被回填或截断。显式传入`as_of`仍表示严格的Replay边界，晚于该边界的报价会在落库、资讯同步和LLM调用前失败关闭。输入准备或策略计算晚于尾盘窗口结束时，任务记录为`missed`且不创建模拟订单。
+
 服务器需要Python 3.12或更高版本。生产依赖固定在`requirements.lock`；GitHub Actions会在Python 3.12上安装锁定依赖、执行Ruff和Pytest，并保存wheel构建产物。
 
 ### 首次初始化服务器
@@ -367,6 +369,7 @@ sudo systemctl status kfcquant-worker kfcquant-web kfcops
 sudo journalctl -u kfcquant-worker -u kfcquant-web -n 200
 sudo kfcquant-admin version --json
 sudo kfcquant-admin health --json
+sudo kfcquant-admin health --json --require-research-healthy
 ```
 
-`health`会报告数据库版本、worker心跳、数据供应商和磁盘余量；`migrate`可重复运行。
+`health`会分别报告基础设施`status`与当前交易日`research.status`，并列出各关键Job；后者会识别失败、降级、错过、超时运行，以及08:30、14:40、14:45截止后仍未启动的任务。默认退出码只用于部署所需的基础设施健康，避免历史业务失败阻止修复版本上线；外部交易日探针应加`--require-research-healthy`，使当前研究时段异常返回非零状态。`migrate`可重复运行。

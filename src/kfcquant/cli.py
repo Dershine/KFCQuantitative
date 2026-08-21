@@ -109,14 +109,26 @@ def show_migration_contract(as_json: bool = typer.Option(False, "--json", help="
 
 
 @app.command()
-def health(as_json: bool = typer.Option(False, "--json", help="输出机器可读JSON")) -> None:
+def health(
+    as_json: bool = typer.Option(False, "--json", help="输出机器可读JSON"),
+    require_research_healthy: bool = typer.Option(
+        False,
+        "--require-research-healthy",
+        help="当前交易日关键研究任务异常时返回非零状态",
+    ),
+) -> None:
     settings = get_settings()
     payload = health_info(settings, configure_observability(settings))
     if as_json:
         console.print_json(json.dumps(payload, ensure_ascii=False, default=str))
     else:
         console.print(payload)
-    if payload["status"] != "ok":
+    research = payload.get("research", {})
+    if payload["status"] != "ok" or (
+        require_research_healthy
+        and isinstance(research, dict)
+        and research.get("status") != "ok"
+    ):
         raise typer.Exit(code=1)
 
 

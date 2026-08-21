@@ -24,7 +24,7 @@ case "${1:-}" in
   app)
     shift
     case "$*" in
-      migrate|"health --json") ;;
+      migrate|"health --json"|"health --json --require-research-healthy") ;;
       *) exit 64 ;;
     esac
     set -a

@@ -30,6 +30,9 @@ class DuckDBDashboardQueryModel:
         candidates = self._database.get_candidates(str(run["run_id"]), include_blocked=True)
         return SignalProjection(run=run, candidates=candidates)
 
+    def latest_job(self, job_name: str, on_date: date | None = None) -> Mapping[str, Any] | None:
+        return self._database.latest_job(job_name, on_date)
+
     def risk_events(self, event_ids: Sequence[str]) -> pd.DataFrame:
         selected = sorted({str(event_id) for event_id in event_ids})
         if not selected:

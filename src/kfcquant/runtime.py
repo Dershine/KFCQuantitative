@@ -131,8 +131,25 @@ def observe_worker_heartbeat(
         return {"ok": False, "error": type(exc).__name__}
 
 
-def health_info(settings: Settings, observability: Observability | None = None) -> dict[str, object]:
+CRITICAL_RESEARCH_JOBS = (
+    "sync-calendar",
+    "run-morning",
+    "evaluate-morning",
+    "run-preclose",
+    "capture-fill",
+    "sync-eod",
+    "run-postclose",
+)
+
+
+def health_info(
+    settings: Settings,
+    observability: Observability | None = None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
     observability = observability or get_observability()
+    observed_at = now or datetime.now(SHANGHAI_TZ)
     database = Database(
         settings.database_path,
         settings.initial_cash,
@@ -158,10 +175,48 @@ def health_info(settings: Settings, observability: Observability | None = None) 
             database.initialize()
         result["database"] = {"ok": True, "schema_version": database.migration_version()}
         result["latest_job"] = database.latest_job()
+        trading_day = database.is_trading_day(observed_at.date())
+        critical_jobs = {
+            name: database.latest_job(name, observed_at.date())
+            for name in CRITICAL_RESEARCH_JOBS
+        }
+        unhealthy: dict[str, object] = {}
+        for name, job in critical_jobs.items():
+            if job is not None and (
+                job["status"] in {"failed", "degraded"}
+                or (trading_day and job["status"] == "missed")
+            ):
+                unhealthy[name] = job
+        signal_deadlines = {
+            "run-morning": settings.schedule.morning_window_end,
+            "run-preclose": settings.schedule.preclose_window_end,
+            "capture-fill": settings.schedule.fill_window_end,
+        }
+        local_time = observed_at.time().replace(tzinfo=None)
+        if trading_day:
+            for name, deadline in signal_deadlines.items():
+                job = critical_jobs[name]
+                if local_time > deadline and job is None:
+                    unhealthy[name] = {
+                        "status": "missing",
+                        "message": f"expected job did not start before {deadline:%H:%M}",
+                    }
+                elif local_time > deadline and job is not None and job["status"] == "running":
+                    unhealthy[name] = job | {
+                        "status": "overdue",
+                        "message": f"job is still running after {deadline:%H:%M}",
+                    }
+        result["research"] = {
+            "status": "degraded" if unhealthy else "ok",
+            "trading_day": trading_day,
+            "unhealthy_jobs": unhealthy,
+            "critical_jobs": critical_jobs,
+        }
     except Exception as exc:
         result["status"] = "degraded"
         result["database"] = {"ok": False, "error": str(exc)}
-    result["worker"] = observe_worker_heartbeat(settings, observability)
+        result["research"] = {"status": "unknown", "error": str(exc)}
+    result["worker"] = observe_worker_heartbeat(settings, observability, now=observed_at)
     if not result["worker"]["ok"]:
         result["status"] = "degraded"
     usage = shutil.disk_usage(settings.database_path.parent.resolve())

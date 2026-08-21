@@ -301,12 +301,15 @@ flowchart TD
 ```text
 14:40触发
 → 校验交易日与时间窗口
-→ 获取并保存实时快照
-→ 校验实时行情新鲜度
+→ 获取实时快照并在响应后冻结Information Cutoff
+→ 单向校验Quote Age与Point-in-time边界
+→ 合法报价批次才进入不可变快照与业务存储
 → 同步截止时间前资讯
 → 校验正式日线新鲜度
 → 读取早盘候选连续性
+→ 输入准备完成时复核14:43硬截止
 → 运行尾盘评分与风险阻断
+→ 发布前再次复核14:43硬截止
 → 保存Signal Run和Candidates
 → 全部门禁通过时创建Paper Orders
 ```
@@ -1287,6 +1290,7 @@ M6-B把证据门槛固化为可执行Policy：至少20个状态为`success`或`d
 | 2026-08-20 | `edea5d6`（候选；生产Active仍为`228f34f`） | 修复OPS-03容量证据语义：分Job样本只接受`success/degraded`，报告v2记录策略，旧版/缺策略报告失败关闭；替换保护窗口后正式部署候选 | OPS-A与OPS-01/02/03均保持IN_PROGRESS且0/10点；新增容量修复作为阶段内不可分割前置且不计点；不改变168点架构路线或扩展架构 | 回归先暴露失败后通过；Ruff、368项全量测试、85.13%合并分支覆盖率、mypy、Bandit、secret扫描、pip-audit和pip check通过；GitHub Actions `32332088735`测试/打包通过；bundle SHA-256 `f46243fdb363c55aafb84c22442d83a963bd185f339bbdeb12e8aee5a251005f`并经服务器验证；真实指标只读聚合保留43个全局Job但排除失败morning，`run-preclose`仍为0；12:36新timer定时15:15且旧timer inactive |
 | 2026-08-20 | `edea5d6`（生产Active；本文档移交提交） | 完成OPS-A1正式发布、恢复验收与环境清理；将OPS-03重分类为不阻塞使用的OPS-A2容量观察 | OPS-01/02与OPS-A1均DONE，6/6点；M0-M6保持168/168与100%；OPS-A2为0/4且DEFERRED；TD-018完成；没有待启动的架构阶段 | 部署id=4与迁移副本预检成功；Active/备份/回滚/Manifest/锁Hash/pip check/doctor/五项服务及裸IP 401/200验收通过；清理后仅保留两份Release、正式备份/日志、产品Scheduler与每周恢复timer；Ruff、368项全量测试、85.13%合并分支覆盖率及最终diff/secret审计通过 |
 | 2026-08-20 | `630b1b4`（生产Active） | 生产20:30资讯积压暴露长同步超过15分钟lease；为早盘、尾盘和收盘统一增加同步期间后台续租并保持续租失败关闭 | 不改变M0-M6 168/168或OPS-A1 DONE；新增TD-019并当次完成；无Schema、依赖、策略、评分、订单或券商变化 | 回归先以缺少heartbeat契约失败后通过；30项关联回归、370项全量测试、85.14%合并分支覆盖率、Ruff、mypy、Bandit、secret扫描及pip check通过；GitHub Actions `32370688488`成功，部署id=5成功；真实AkShare/LLM任务每30秒续租且lease到期时间持续后移；过期任务由正式入口恢复后唯一一次重跑成功，7,879条资讯全部处理并生成1份报告，最终health为`ok` |
+| 2026-08-21 | `630b1b4`（生产事故；本地修复工作区） | 首个真实14:40样本暴露任务启动截止时间与延迟行情响应冲突、负Quote Age被绝对值误判且失败不可见；实时运行改为报价返回后冻结边界，未来报价前置失败，三段窗口截止门禁，首页与交易日Research Health显式呈现异常 | 不改变策略、评分、订单、Schema或M0-M6路线；新增生产时序可靠性改进，正式发布前保持工作区候选 | 生产Job `17a86459-0b74-4192-9de5-ce8698fb0db7`于14:42:32因晚于14:40:00截止的报价失败，Quote Age约-30秒且未发布Signal；本地新增时钟推进、未来报价前置失败、超窗missed、首页失败状态及Research Health回归；375项测试通过、1项跳过，合并分支覆盖率86.73%，Ruff、mypy、Bandit、secret扫描与pip check通过 |
 
 ---
 
